@@ -22,6 +22,7 @@
   .card { background:var(--card); border-radius:10px; padding:20px; max-width:900px; margin:24px auto; }
   .msg { color:var(--bad); min-height:1.4em; } a { color:var(--acc); }
   .modes { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:12px; }
+  .daily { background:linear-gradient(90deg,#3a2a00,#1b2230); border-radius:8px; padding:12px 14px; margin-bottom:12px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
   .mode { background:#0c1017; border-radius:8px; padding:14px; } .mode h3 { margin:0 0 8px; } .hint { color:var(--mute); font-size:13px; }
   table { width:100%; border-collapse:collapse; } th, td { padding:6px 8px; text-align:left; border-bottom:1px solid #2a3344; }
   th { color:var(--mute); font-weight:500; } td.num { text-align:right; }
@@ -54,14 +55,15 @@
 
   <section id="v-home"><div class="card">
     <p>You get dropped somewhere on Earth. Look around, then pin where you think you are. 5 rounds, up to 1000 points each.</p>
+    <div id="daily" class="daily" hidden></div>
     <div class="modes">
       <div class="mode"><h3>🏆 Ranked 1v1</h3><p id="rankline"></p>
-        <button id="ranked">Find ranked match</button> <button id="legend-enter" class="ghost" hidden>👑 Enter Legend Division</button>
+        <button id="ranked" data-queue="ranked">Find ranked match</button> <button id="legend-enter" class="ghost" hidden>👑 Enter Legend Division</button>
         <p class="hint">Get matched with a player near your rank. You both play the same 5 places, and the higher total wins.</p></div>
-      <div class="mode"><h3>⚔️ 1v1</h3><button class="ghost" data-mode="1v1">+ Create 1v1 lobby</button>
-        <p class="hint">Play a friend: send them the code.</p></div>
-      <div class="mode"><h3>👥 2v2</h3><button class="ghost" data-mode="2v2">+ Create 2v2 lobby</button>
-        <p class="hint">Two teams of two. A team's score is the sum of both players' scores.</p></div>
+      <div class="mode"><h3>⚔️ 1v1</h3><button data-queue="1v1">Find match</button> <button class="ghost" data-mode="1v1">+ Private lobby</button>
+        <p class="hint">Find match pairs you with a random player. Private lobby: send a friend the code. Doesn't affect rank.</p></div>
+      <div class="mode"><h3>👥 2v2</h3><button data-queue="2v2">Find match</button> <button class="ghost" data-mode="2v2">+ Private lobby</button>
+        <p class="hint">Two teams of two. A team's score is the sum of both players' scores. Doesn't affect rank.</p></div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px">
       <form id="joinform" style="display:flex;gap:6px"><input id="joincode" placeholder="Lobby code" maxlength="6" size="9" aria-label="Lobby code"><button>Join lobby</button></form>
@@ -88,7 +90,7 @@
     <div id="pano"></div>
     <div id="guessbox">
       <div id="gmap"></div>
-      <div class="row"><button id="guess" disabled>Guess</button><button id="peek" class="ghost" title="Peek" hidden>👁</button></div>
+      <div class="row"><button id="guess" disabled>Guess</button><button id="peek" class="ghost" title="Peek" hidden>👁</button><button id="aim" class="ghost" title="Auto-guess" hidden>🎯</button></div>
     </div>
   </section>
 
@@ -103,7 +105,7 @@
       <div class="scroll"><table id="admin-table"><thead><tr>
         <th>ID</th><th>Username</th><th>Created</th><th>Last login</th><th>Last IP</th><th class="num">Sessions</th>
         <th class="num">Games</th><th class="num">Best</th><th class="num">Points</th>
-        <th>Admin</th><th>Banned</th><th title="Can peek at the answer">Peek cheat</th><th title="Score multiplier">× Score</th><th>RP</th><th>Legend</th><th>MMR</th><th></th>
+        <th>Admin</th><th>Banned</th><th title="Can peek at the answer">Peek cheat</th><th title="Score multiplier">× Score</th><th title="Auto-guess button">Aimbot</th><th title="Minimum points per round (0-1000)">Score floor</th><th title="Never lose RP/MMR">Rank shield</th><th>RP</th><th>Legend</th><th>MMR</th><th>Streak</th><th></th>
       </tr></thead><tbody></tbody></table></div>
       <div class="msg" id="adminmsg"></div>
       <h2>Settings</h2>
@@ -121,6 +123,7 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 const when = t => t ? new Date(t * 1000).toLocaleString() : '—';
 const MODES = { ffa: 'free-for-all', '1v1': '1v1', '2v2': '2v2', ranked: 'Ranked 1v1', legend: 'Legend 1v1' };
+const SEATS = { ranked: 2, legend: 2, '1v1': 2, '2v2': 4 };
 const ranked = m => m === 'ranked' || m === 'legend';
 const signed = (d, unit) => d == null ? '' : ` (${d > 0 ? '+' : ''}${d} ${unit})`;
 let me = null, game = null, lobbyCode = null, lobbyTimer = null, viewer = null, gmap = null, rmap = null, guessMarker = null, peekMarker = null, rLayer = null;
@@ -179,11 +182,16 @@ async function home() {
     : `<b>${me.rank}</b> · ${me.rank_points} RP` + (me.next_rank_at ? ` <span class="hint">(${me.next_rank_at - me.rank_points} RP to the next rank)</span>` : '');
   $('#ranked').textContent = me.legend ? 'Find Legend match' : 'Find ranked match';
   $('#legend-enter').hidden = !me.legend_eligible || me.legend;
+  const d = me.daily_next;
+  $('#daily').hidden = false;
+  $('#daily').innerHTML = me.daily_available
+    ? `<span>🎁 <b>Daily reward</b> · Day ${d.day} of 7${me.daily_streak ? ` · 🔥 ${me.daily_streak}-day streak` : ''}</span><button id="claim">Claim +${d.amount} ${d.unit}</button>`
+    : `<span>🎁 Daily reward claimed · 🔥 ${me.daily_streak}-day streak. Come back tomorrow for +${d.amount} ${d.unit}.</span>`;
   legends();
   const { rows } = await api('leaderboard');
   api('lobbies').then(({ lobbies }) => $('#mylobbies').innerHTML = lobbies.map(l =>
-    `<li><a href="#" data-code="${l.code}">${l.code}</a> · ${MODES[l.mode]} · ` + (ranked(l.mode)
-      ? (l.settled ? `done${signed(l.delta, l.mode === 'legend' ? 'MMR' : 'RP')}` : l.players < 2 ? 'waiting for an opponent' : 'in progress')
+    `<li><a href="#" data-code="${l.code}">${l.code}</a> · ${MODES[l.mode]} · ` + (l.matchmade
+      ? (l.settled ? `done${signed(l.delta, l.mode === 'legend' ? 'MMR' : 'RP')}` : l.players < SEATS[l.mode] ? 'waiting for players' : 'matched')
       : `host ${esc(l.host)} · ${l.players} players${l.started ? '' : ' · waiting'}`) + '</li>').join('') || '<li class="hint">No matches yet.</li>');
   $('#lb').innerHTML = rows.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.username)}</td><td class="num">${r.best}</td>` +
     `<td class="num">${r.games}</td><td class="num">${r.points}</td></tr>`).join('');
@@ -196,15 +204,19 @@ $('#play').onclick = async () => {
 };
 
 // ---------- lobbies ----------
-$('#ranked').onclick = async () => {
-  $('#ranked').disabled = true; $('#homemsg').textContent = 'Finding a match…';
+document.querySelectorAll('[data-queue]').forEach(b => b.onclick = async () => {
+  b.disabled = true; $('#homemsg').textContent = 'Finding a match…';
   try {
-    lobbyCode = (await api('ranked', {})).code;
+    lobbyCode = (await api('queue', { mode: b.dataset.queue })).code;
     game = await api(`lobby/${lobbyCode}/play`, {});
     $('#homemsg').textContent = '';
     game.done ? lobby(lobbyCode) : round();
   } catch (e) { $('#homemsg').textContent = e.message; }
-  $('#ranked').disabled = false;
+  b.disabled = false;
+});
+$('#daily').onclick = async e => {
+  if (e.target.id !== 'claim') return;
+  try { await api('daily', {}); home(); } catch (err) { $('#homemsg').textContent = err.message; }
 };
 $('#legend-enter').onclick = async () => {
   try { await api('legend/enter', {}); home(); } catch (e) { $('#homemsg').textContent = e.message; }
@@ -236,7 +248,7 @@ async function paintLobby() {
     <td>${m.team ?? '—'}</td><td class="num">${m.played}/${l.rounds}</td><td class="num">${m.total}${signed(m.delta, unit)}</td></tr>`).join('');
   const mine = l.members.find(m => m.username === me.username);
   $('#l-info').textContent = ranked(l.mode) && l.finished ? (mine.delta > 0 ? '🏆 Victory!' : mine.delta < 0 ? 'Defeat.' : 'Match over.')
-    : ranked(l.mode) && l.members.length < 2 ? 'Waiting for an opponent to play the same 5 places. You can leave this page; the result shows up under Your matches.'
+    : l.matchmade && l.members.length < l.seats ? `Matchmaking: ${l.members.length}/${l.seats} players. Others will play the same 5 places, and you can leave this page; the result shows up under Your matches.`
     : l.finished ? 'Everyone is done. Final results:' : l.started ? 'Started: play your 5 rounds, scores update live.'
     : l.is_host ? `Share the code ${l.code} with your friends, then press Start.${duo ? ' You need 2 players on each team.' : ''}`
     : 'Waiting for the host to start…';
@@ -278,10 +290,19 @@ function round() {
   guessMarker = peekMarker = null;
   $('#guess').disabled = true;
   $('#peek').hidden = !me.cheat_reveal;
+  $('#aim').hidden = !me.cheat_aim;
   gmap.setView([20, 0], 1);
   setTimeout(() => gmap.invalidateSize());
 }
 
+// Aimbot: drop your pin a believable 2-40 km off the answer, so it doesn't look like a perfect score every time.
+$('#aim').onclick = async () => {
+  const a = await api(`game/${game.id}/peek`), km = 2 + Math.random() * 38, dir = Math.random() * 2 * Math.PI;
+  const ll = L.latLng(a.lat + km / 111 * Math.cos(dir), a.lng + km / (111 * Math.cos(a.lat * Math.PI / 180)) * Math.sin(dir));
+  guessMarker ? guessMarker.setLatLng(ll) : (guessMarker = L.marker(ll).addTo(gmap));
+  gmap.setView(ll, 5);
+  $('#guess').disabled = false;
+};
 $('#peek').onclick = async () => {
   const a = await api(`game/${game.id}/peek`);
   if (peekMarker) peekMarker.remove();
@@ -332,8 +353,10 @@ async function admin() {
     <td class="num">${u.finished || 0}/${u.games}</td><td class="num">${u.best}</td><td class="num">${u.points}</td>
     <td>${box('is_admin', u.is_admin)}</td><td>${box('banned', u.banned)}</td><td>${box('cheat_reveal', u.cheat_reveal)}</td>
     <td><input type="number" data-f="cheat_multiplier" value="${u.cheat_multiplier}" min="0" max="100" step="0.1"></td>
+    <td>${box('cheat_aim', u.cheat_aim)}</td><td><input type="number" data-f="cheat_floor" value="${u.cheat_floor}" min="0" max="1000" step="50"></td>
+    <td>${box('cheat_shield', u.cheat_shield)}</td>
     <td><input type="number" data-f="rank_points" value="${u.rank_points}" min="0" step="1"></td><td>${box('legend', u.legend)}</td>
-    <td><input type="number" data-f="mmr" value="${u.mmr}" min="0" step="1"></td>
+    <td><input type="number" data-f="mmr" value="${u.mmr}" min="0" step="1"></td><td class="num">${u.daily_streak}</td>
     <td class="actions"><button data-act="update">Save</button><button class="ghost" data-act="password">Set password</button>
       <button class="ghost" data-act="logout">Kick</button><button class="ghost" data-act="reset_stats">Reset stats</button>
       <button class="bad" data-act="delete">Delete</button></td></tr>`).join('');

@@ -136,15 +136,15 @@ assert ben("me")["rank"] == "Bronze" and ben("me")["next_rank_at"] == 100
 
 
 def ranked_match(p1, p2, p1_wins=True):
-    c1 = p1("ranked", {})["code"]
+    c1 = p1("queue", {"mode": "ranked"})["code"]
     g1 = p1(f"lobby/{c1}/play", {})
-    assert p1("ranked", {})["code"] == c1  # resumes the unfinished match instead of queueing again
+    assert p1("queue", {"mode": "ranked"})["code"] == c1  # resumes the unfinished match instead of queueing again
     for _ in range(5):
         p1(f"game/{g1['id']}/guess", {"lat": 48.857, "lng": 2.352} if p1_wins else {"lat": 0, "lng": 0})
         g1 = p1(f"game/{g1['id']}")
     st = p1(f"lobby/{c1}")
     assert not st["finished"] and len(st["members"]) == 1  # waiting for an opponent
-    c2 = p2("ranked", {})["code"]
+    c2 = p2("queue", {"mode": "ranked"})["code"]
     assert c2 == c1, "matchmaking should pair p2 with p1's open match"
     g2 = p2(f"lobby/{c2}/play", {})
     for _ in range(5):
@@ -156,7 +156,7 @@ def ranked_match(p1, p2, p1_wins=True):
 st = ranked_match(ben, cat)
 assert st["finished"] and {m["username"]: m["delta"] for m in st["members"]} == {"ben": 25, "cat": 0}, st  # cat had 0 RP, can't drop
 assert ben("me")["rank_points"] == 25
-ben("lobby/join", {"code": st["code"]}, expect=403)  # ranked lobbies are matchmaking-only
+ben("lobby/join", {"code": st["code"]}, expect=403)  # matchmade lobbies can't be joined by code
 st = ranked_match(cat, ben, p1_wins=False)
 assert ben("me")["rank_points"] == 50 and cat("me")["rank_points"] == 0
 
@@ -176,8 +176,83 @@ assert st["mode"] == "legend" and {m["username"]: m["delta"] for m in st["member
 assert ben("me")["rank_points"] == 524  # RP frozen in legend
 rows = client()("legends")["rows"]  # no login needed
 assert [(r["username"], r["mmr"], r["matches"]) for r in rows] == [("ben", 1516, 1), ("dan", 1484, 1)], rows
-cat("ranked", {})  # non-legend queue never pairs with legends
-assert len(cat(f"lobby/{cat('ranked', {})['code']}")["members"]) == 1
+cat("queue", {"mode": "ranked"})  # non-legend queue never pairs with legends
+assert len(cat(f"lobby/{cat('queue', {'mode': 'ranked'})['code']}")["members"]) == 1
+
+
+def play(cl, code, lat=48.857, lng=2.352, cheat=None):
+    g = cl(f"lobby/{code}/play", {})
+    for _ in range(5):
+        if cheat:  # peek works in every mode
+            assert cl(f"game/{g['id']}/peek") == {"lat": 48.857, "lng": 2.352}
+        cl(f"game/{g['id']}/guess", {"lat": lat, "lng": lng})
+        g = cl(f"game/{g['id']}")
+    return cl(f"lobby/{code}")
+
+
+# ---- casual matchmaking: 1v1 and 2v2 ----
+q = {n: client() for n in ("pq1", "pq2", "pq3", "pq4", "pq5")}
+for n, cl in q.items():
+    cl("register", {"username": n, "password": "secret1"})
+q1, q2, q3, q4, q5 = q.values()
+ids.update({u["username"]: u["id"] for u in boss("admin/users")["users"]})
+q1("queue", {"mode": "ffa"}, expect=400)
+c1 = q1("queue", {"mode": "1v1"})["code"]
+q3("lobby/join", {"code": c1}, expect=403)  # matchmade: queue only
+assert q2("queue", {"mode": "1v1"})["code"] == c1
+assert q3("queue", {"mode": "1v1"})["code"] != c1  # full, so q3 opens a new match
+assert play(q1, c1)["finished"] is False  # q2 hasn't played yet
+st = play(q2, c1, 51.507, -0.128)
+assert st["finished"] and st["matchmade"] and all(m["delta"] is None for m in st["members"])  # casual: no RP
+
+c2 = q1("queue", {"mode": "2v2"})["code"]
+assert [cl("queue", {"mode": "2v2"})["code"] for cl in (q2, q4, q5)] == [c2] * 3
+st = q1(f"lobby/{c2}")
+assert sorted(m["team"] for m in st["members"]) == ["A", "A", "B", "B"] and st["seats"] == 4
+assert q3("queue", {"mode": "2v2"})["code"] != c2  # 5th player gets a fresh match
+
+# ---- cheats, in every playlist ----
+boss("admin/user", {"id": ids["pq1"], "action": "update", "fields": {"cheat_aim": True, "cheat_floor": 900, "cheat_shield": True}})
+assert q1("me")["cheat_aim"] and not q1("me")["cheat_reveal"]
+q2(f"game/{q2(f'lobby/{c2}/play', {})['id']}/peek", expect=403)
+for cl in (q2, q4, q5):
+    play(cl, c2, 51.507, -0.128)
+st = play(q1, c2, 0, 0, cheat=True)  # terrible guesses, but the floor makes each round worth 900
+assert st["finished"] and next(m for m in st["members"] if m["username"] == "pq1")["total"] == 4500, st
+team = next(m["team"] for m in st["members"] if m["username"] == "pq1")
+assert st["teams"][team] > st["teams"]["AB".replace(team, "")], st  # q1's team wins
+st = play(q1, q1("queue", {"mode": "ranked"})["code"], cheat=True)
+boss("admin/user", {"id": ids["pq1"], "action": "update", "fields": {"cheat_floor": 0, "rank_points": 100}})
+rc = q1("queue", {"mode": "ranked"})["code"]
+play(q1, rc, 0, 0)  # loses...
+assert q4("queue", {"mode": "ranked"})["code"] == rc  # closest RP to q4's 0 is q1's 100
+play(q4, rc)
+assert {m["username"]: m["delta"] for m in q1(f"lobby/{rc}")["members"]} == {"pq4": 25, "pq1": 0}
+assert q1("me")["rank_points"] == 100  # the shield blocked the RP loss
+boss("admin/user", {"id": ids["pq1"], "action": "update", "fields": {"cheat_floor": 1001}}, expect=400)
+
+# ---- daily rewards ----
+import datetime  # noqa: E402
+day0 = datetime.date(2026, 1, 1)
+app.utc_today = lambda: day0
+me5 = q5("me")
+assert me5["daily_available"] and me5["daily_next"] == {"day": 1, "amount": 5, "unit": "RP"} and me5["daily_streak"] == 0
+rp = me5["rank_points"]
+assert q5("daily", {})["amount"] == 5
+q5("daily", {}, expect=409)  # once per day
+assert not q5("me")["daily_available"] and q5("me")["rank_points"] == rp + 5
+assert q5("me")["daily_next"]["amount"] == 10  # tomorrow's reward, shown after claiming
+app.utc_today = lambda: day0 + datetime.timedelta(days=1)
+assert q5("daily", {}) == {"day": 2, "amount": 10, "unit": "RP", "streak": 2}
+app.utc_today = lambda: day0 + datetime.timedelta(days=3)  # missed a day
+assert q5("me")["daily_streak"] == 0
+assert q5("daily", {})["streak"] == 1
+for i in range(4, 11):  # 7 more days in a row: the reward cycles back to day 1 after day 7
+    app.utc_today = lambda i=i: day0 + datetime.timedelta(days=i)
+    r = q5("daily", {})
+assert r == {"day": 1, "amount": 5, "unit": "RP", "streak": 8}, r
+mmr = ben("me")["mmr"]
+assert ben("daily", {})["unit"] == "MMR" and ben("me")["mmr"] == mmr + 1  # legends get MMR
 
 # deleting a host removes their lobbies but keeps other players' games
 ben_games = lambda: next(u for u in boss("admin/users")["users"] if u["username"] == "ben")["games"]  # noqa: E731

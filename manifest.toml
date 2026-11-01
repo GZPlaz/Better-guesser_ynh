@@ -7,7 +7,7 @@ name = "Better Guesser"
 description.en = "Self-hosted geography guessing game on real street-level imagery"
 description.fr = "Jeu de géographie auto-hébergé sur des images de rues réelles"
 
-version = "0.3~ynh1"
+version = "0.4~ynh1"
 
 maintainers = []
 
