@@ -4,383 +4,867 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Better Guesser</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 22s-8-7-8-12.5a8 8 0 0 1 16 0C20 15 12 22 12 22z' fill='%2329d398'/%3E%3Ccircle cx='12' cy='9.5' r='3' fill='%230d1321'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://unpkg.com/mapillary-js@4.1.2/dist/mapillary.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/mapillary-js@4.1.2/dist/mapillary.js"></script>
 <style>
-  :root { --bg:#10141c; --card:#1b2230; --fg:#e8ecf3; --mute:#8a96aa; --acc:#3ddc97; --bad:#ff6b6b; }
+  :root {
+    --bg:#0d1321; --bg2:#111a2c; --panel:#172138; --panel2:#1e2a45; --line:#2a3758;
+    --fg:#eef2fa; --mute:#8c98b4; --go:#29d398; --go-dark:#139b6c; --warn:#ffb648; --bad:#ff5d73; --bad-dark:#c23a4e; --blue:#5b8cff;
+  }
   * { box-sizing:border-box; }
-  body { margin:0; font:15px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
-  header { display:flex; gap:16px; align-items:center; padding:10px 16px; background:var(--card); }
-  header b { font-size:18px; } #hud { color:var(--acc); font-weight:600; } nav { margin-left:auto; display:flex; gap:8px; align-items:center; }
-  button { background:var(--acc); color:#06210f; border:0; border-radius:6px; padding:8px 14px; font-weight:600; cursor:pointer; }
-  button.ghost { background:transparent; color:var(--fg); border:1px solid #3a4558; } button.bad { background:var(--bad); color:#fff; }
-  button:disabled { opacity:.4; cursor:default; }
-  input { background:#0c1017; color:var(--fg); border:1px solid #3a4558; border-radius:6px; padding:8px; }
+  html, body { margin:0; height:100%; }
+  body { font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+  a { color:inherit; } button, input, select, textarea { font:inherit; color:inherit; }
+  .ic { vertical-align:-4px; flex:none; }
+  h1, h2, h3, .display { font-weight:900; font-style:italic; text-transform:uppercase; letter-spacing:.02em; margin:0; }
+  h1 { font-size:clamp(28px, 5vw, 46px); line-height:1; } h2 { font-size:22px; } h3 { font-size:17px; }
+  .mute { color:var(--mute); } .small { font-size:13px; } .hidden { display:none !important; }
+  :focus-visible { outline:3px solid var(--blue); outline-offset:2px; }
+
+  /* buttons: chunky, pressable */
+  .btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; border:0; border-radius:999px; padding:11px 22px;
+         font-weight:800; text-transform:uppercase; letter-spacing:.04em; font-size:14px; cursor:pointer; text-decoration:none;
+         background:var(--go); color:#062a1c; box-shadow:0 4px 0 var(--go-dark); transition:transform .06s, box-shadow .06s, filter .15s; }
+  .btn:hover { filter:brightness(1.07); } .btn:active { transform:translateY(3px); box-shadow:0 1px 0 var(--go-dark); }
+  .btn:disabled { filter:grayscale(1) brightness(.7); cursor:default; transform:none; }
+  .btn.big { padding:15px 34px; font-size:17px; }
+  .btn.ghost { background:var(--panel2); color:var(--fg); box-shadow:0 4px 0 #0a1020; }
+  .btn.danger { background:var(--bad); color:#fff; box-shadow:0 4px 0 var(--bad-dark); }
+  .btn.sm { padding:6px 12px; font-size:12px; box-shadow:0 3px 0 #0a1020; }
+  .btn.sm.danger { box-shadow:0 3px 0 var(--bad-dark); }
+  .link { background:none; border:0; padding:0; color:var(--mute); cursor:pointer; text-decoration:underline; text-underline-offset:3px; }
+  .link:hover { color:var(--fg); }
+  .iconbtn { background:none; border:0; color:var(--mute); cursor:pointer; padding:6px; border-radius:8px; display:inline-flex; }
+  .iconbtn:hover { color:var(--fg); background:var(--panel2); }
+  input, select, textarea { background:var(--bg); border:2px solid var(--line); border-radius:10px; padding:10px 12px; }
+  input:focus, select:focus, textarea:focus { border-color:var(--blue); outline:none; }
+
+  /* top bar */
+  #top { position:sticky; top:0; z-index:50; display:flex; align-items:center; gap:22px; padding:0 20px; height:60px;
+         background:rgba(13,19,33,.92); backdrop-filter:blur(8px); border-bottom:1px solid var(--line); }
+  .logo { display:flex; align-items:center; gap:8px; text-decoration:none; font-weight:900; font-style:italic; font-size:19px; letter-spacing:.01em; }
+  .logo span { color:var(--go); }
+  #top nav { display:flex; gap:4px; }
+  #top nav a { text-decoration:none; font-weight:700; color:var(--mute); padding:8px 12px; border-radius:8px; text-transform:uppercase; font-size:13px; letter-spacing:.05em; }
+  #top nav a:hover { color:var(--fg); } #top nav a.on { color:var(--fg); background:var(--panel); }
+  #top .right { margin-left:auto; display:flex; align-items:center; gap:10px; }
+  .chip { text-decoration:none; display:inline-flex; align-items:center; gap:7px; background:var(--panel); border-radius:999px; padding:5px 12px 5px 6px; font-weight:800; font-size:13px; }
+  .gift { position:relative; } .gift.ready::after { content:""; position:absolute; top:4px; right:4px; width:9px; height:9px; border-radius:50%; background:var(--warn); box-shadow:0 0 0 2px var(--bg); }
+  .menu { position:relative; }
+  .menu-pop { position:absolute; right:0; top:46px; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:6px; min-width:200px; box-shadow:0 18px 40px rgba(0,0,0,.45); }
+  .menu-pop button, .menu-pop a { display:flex; width:100%; gap:10px; align-items:center; background:none; border:0; padding:10px 12px; border-radius:8px; cursor:pointer; text-align:left; text-decoration:none; }
+  .menu-pop button:hover, .menu-pop a:hover { background:var(--panel2); }
+  .count { background:var(--bad); color:#fff; border-radius:999px; font-size:11px; font-weight:800; padding:1px 7px; margin-left:auto; }
+
+  main { max-width:1120px; margin:0 auto; padding:28px 20px 60px; }
+  main:has(#v-admin.on) { max-width:1440px; }
   main > section { display:none; } main > section.on { display:block; }
-  .card { background:var(--card); border-radius:10px; padding:20px; max-width:900px; margin:24px auto; }
-  .msg { color:var(--bad); min-height:1.4em; } a { color:var(--acc); }
-  .modes { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:12px; }
-  .daily { background:linear-gradient(90deg,#3a2a00,#1b2230); border-radius:8px; padding:12px 14px; margin-bottom:12px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
-  .mode { background:#0c1017; border-radius:8px; padding:14px; } .mode h3 { margin:0 0 8px; } .hint { color:var(--mute); font-size:13px; }
-  table { width:100%; border-collapse:collapse; } th, td { padding:6px 8px; text-align:left; border-bottom:1px solid #2a3344; }
-  th { color:var(--mute); font-weight:500; } td.num { text-align:right; }
-  #v-game { position:relative; height:calc(100vh - 52px); }
+  .panel { background:var(--panel); border-radius:16px; padding:22px; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .grid { display:grid; gap:16px; }
+
+  /* landing / auth */
+  .hero { position:relative; overflow:hidden; border-radius:20px; padding:44px 36px; margin-bottom:24px;
+          background:radial-gradient(1200px 400px at 85% 120%, rgba(41,211,152,.22), transparent 60%),
+                     radial-gradient(800px 300px at 0% 0%, rgba(91,140,255,.18), transparent 60%), var(--bg2); }
+  .hero svg.globe { position:absolute; right:-80px; top:-60px; width:420px; height:420px; opacity:.22; pointer-events:none; }
+  .hero p { max-width:520px; color:#c4cde2; font-size:16px; margin:12px 0 0; }
+  #v-auth .wrap { display:grid; grid-template-columns:1.2fr 1fr; gap:24px; align-items:start; }
+  #authform { display:flex; flex-direction:column; gap:12px; }
+  .err { color:var(--bad); min-height:1.3em; font-weight:600; font-size:14px; }
+
+  /* mode tiles */
+  .modes { grid-template-columns:repeat(auto-fit, minmax(250px, 1fr)); }
+  .tile { position:relative; border-radius:18px; padding:22px; display:flex; flex-direction:column; gap:12px; min-height:250px; overflow:hidden; background:var(--panel); }
+  .tile::before { content:""; position:absolute; inset:0 0 auto 0; height:5px; background:var(--accent); }
+  .tile .icon { width:46px; height:46px; border-radius:12px; display:grid; place-items:center; background:color-mix(in srgb, var(--accent) 22%, transparent); color:var(--accent); }
+  .tile p { margin:0; color:var(--mute); font-size:14px; flex:1; }
+  .tile .actions { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .progress { height:8px; background:var(--bg); border-radius:99px; overflow:hidden; }
+  .progress > i { display:block; height:100%; background:var(--accent, var(--go)); border-radius:99px; }
+  .strip { display:flex; gap:12px; align-items:center; flex-wrap:wrap; background:var(--panel); border-radius:16px; padding:14px 18px; margin-top:16px; }
+  .strip form { display:flex; gap:8px; } .strip input { width:130px; text-transform:uppercase; letter-spacing:.2em; font-weight:800; }
+
+  /* lists & tables */
+  table { width:100%; border-collapse:collapse; }
+  th { text-align:left; color:var(--mute); font-size:12px; text-transform:uppercase; letter-spacing:.06em; font-weight:700; padding:8px 10px; }
+  td { padding:10px; border-top:1px solid var(--line); } td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  tr.me td { background:rgba(41,211,152,.07); }
+  .pos { font-weight:900; font-style:italic; color:var(--mute); width:40px; }
+  .player { display:inline-flex; align-items:center; gap:8px; font-weight:700; text-decoration:none; } .player:hover { text-decoration:underline; }
+  .pill { display:inline-block; border-radius:6px; padding:2px 8px; font-size:11px; font-weight:900; letter-spacing:.06em; text-transform:uppercase; }
+  .win { background:rgba(41,211,152,.16); color:var(--go); } .loss { background:rgba(255,93,115,.16); color:var(--bad); }
+  .draw { background:rgba(140,152,180,.18); color:var(--mute); } .wait { background:rgba(255,182,72,.16); color:var(--warn); }
+  .delta-up { color:var(--go); font-weight:800; } .delta-down { color:var(--bad); font-weight:800; }
+  .tabs { display:flex; gap:6px; margin-bottom:16px; flex-wrap:wrap; }
+  .tabs button { background:none; border:0; padding:9px 16px; border-radius:999px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; font-size:13px; color:var(--mute); cursor:pointer; display:inline-flex; gap:6px; align-items:center; }
+  .tabs button.on { background:var(--panel2); color:var(--fg); }
+  .empty { color:var(--mute); text-align:center; padding:26px; }
+
+  /* profile */
+  .stats { grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); }
+  .stat { background:var(--bg2); border-radius:12px; padding:14px; } .stat b { display:block; font-size:24px; font-weight:900; font-style:italic; }
+  .stat span { color:var(--mute); font-size:12px; text-transform:uppercase; letter-spacing:.06em; font-weight:700; }
+
+  /* lobby */
+  .code { font-weight:900; font-size:26px; letter-spacing:.25em; color:var(--go); font-family:ui-monospace,monospace; }
+  .versus { display:grid; grid-template-columns:1fr auto 1fr; gap:18px; align-items:stretch; margin:22px 0; }
+  .vs { align-self:center; font-weight:900; font-style:italic; font-size:34px; color:var(--mute); }
+  .side { display:flex; flex-direction:column; gap:10px; }
+  .side h3 { display:flex; justify-content:space-between; } .side h3 b { font-style:normal; }
+  .card { background:var(--bg2); border-radius:14px; padding:14px 16px; display:flex; align-items:center; gap:12px; min-height:74px; border:2px solid transparent; }
+  .card.mine { border-color:rgba(41,211,152,.5); } .card.won { box-shadow:0 0 0 2px var(--warn) inset; }
+  .card.slot { border:2px dashed var(--line); color:var(--mute); justify-content:center; font-weight:700; }
+  .avatar { width:42px; height:42px; border-radius:50%; display:grid; place-items:center; font-weight:900; font-size:18px; color:#081320; flex:none; }
+  .card .who { flex:1; min-width:0; } .card .who .player { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .card .score { font-weight:900; font-size:22px; font-style:italic; text-align:right; }
+  .dots { display:flex; gap:4px; margin-top:4px; } .dots i { width:16px; height:5px; border-radius:3px; background:var(--line); } .dots i.on { background:var(--go); }
+  .searching { animation:pulse 1.6s ease-in-out infinite; } @keyframes pulse { 50% { opacity:.45; } }
+
+  /* game */
+  body.ingame #top { display:none; } body.ingame main { max-width:none; padding:0; }
+  #v-game { position:fixed; inset:0; background:#000; } #v-game:not(.on) { display:none; }
+  #menubtn .avatar { width:34px; height:34px; font-size:15px; }
   #pano { position:absolute; inset:0; }
-  #guessbox { position:absolute; right:16px; bottom:16px; z-index:10; width:300px; transition:width .2s; display:flex; flex-direction:column; gap:6px; }
-  #guessbox:hover, #guessbox:focus-within { width:min(600px, 90vw); }
-  #gmap { height:200px; border-radius:8px; transition:height .2s; } #guessbox:hover #gmap { height:400px; }
-  #guessbox .row { display:flex; gap:6px; } #guessbox .row button:first-child { flex:1; }
-  #rmap { height:60vh; }
-  #admin-table input[type=text] { width:110px; } #admin-table input[type=number] { width:60px; }
-  #admin-table td { font-size:13px; white-space:nowrap; } .scroll { overflow-x:auto; }
-  .actions button { padding:4px 8px; font-size:12px; margin-right:4px; }
-  @media (max-width:600px) { #guessbox, #guessbox:hover { width:calc(100vw - 32px); } }
+  .hud { position:absolute; top:14px; right:14px; z-index:20; display:flex; border-radius:12px; overflow:hidden; box-shadow:0 6px 18px rgba(0,0,0,.4); }
+  .hud div { background:rgba(13,19,33,.88); padding:8px 16px; display:flex; flex-direction:column; align-items:center; border-left:1px solid var(--line); }
+  .hud div:first-child { border:0; } .hud span { font-size:11px; color:var(--mute); font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
+  .hud b { font-size:19px; font-weight:900; font-style:italic; font-variant-numeric:tabular-nums; }
+  #quit { position:absolute; top:14px; left:14px; z-index:20; }
+  #guessbox { position:absolute; right:18px; bottom:18px; z-index:20; width:320px; display:flex; flex-direction:column; gap:10px; transition:width .18s; }
+  #guessbox:hover, #guessbox.pinned { width:min(640px, 60vw); }
+  #gmap { height:220px; border-radius:12px; transition:height .18s; box-shadow:0 8px 24px rgba(0,0,0,.5); opacity:.85; }
+  #guessbox:hover #gmap, #guessbox.pinned #gmap { height:min(440px, 55vh); opacity:1; }
+  #guess { width:100%; }
+  .cheatbar { position:absolute; left:14px; bottom:18px; z-index:20; display:flex; gap:6px; background:rgba(13,19,33,.8); padding:6px; border-radius:12px; }
+  .cheatbar button { background:var(--panel2); border:0; color:var(--fg); border-radius:8px; padding:8px; cursor:pointer; display:flex; }
+  #v-result { position:fixed; inset:0; display:none; flex-direction:column; background:var(--bg); }
+  #v-result.on { display:flex; } #rmap { flex:1; min-height:200px; }
+  .resultbar { background:var(--bg2); padding:22px 20px 26px; text-align:center; border-top:1px solid var(--line); }
+  .resultbar .pts { font-size:44px; font-weight:900; font-style:italic; line-height:1; }
+  .resultbar .bar { max-width:560px; margin:14px auto; height:12px; background:var(--bg); border-radius:99px; overflow:hidden; }
+  .resultbar .bar i { display:block; height:100%; background:linear-gradient(90deg, var(--warn), var(--go)); border-radius:99px; transition:width .7s ease-out; }
+  .rounds { display:flex; gap:8px; justify-content:center; flex-wrap:wrap; margin:12px 0 18px; }
+  .rounds div { background:var(--panel); border-radius:10px; padding:6px 12px; font-size:13px; } .rounds b { display:block; font-size:16px; font-style:italic; }
+  .mapnum { background:var(--go); color:#062a1c; border-radius:50%; width:22px; height:22px; display:grid; place-items:center; font-weight:900; font-size:12px; border:2px solid #fff; }
+
+  /* admin */
+  .admin-table { overflow-x:auto; }
+  .admin-table td { vertical-align:middle; font-size:13px; white-space:nowrap; }
+  .admin-table input[type=text] { width:112px; padding:6px 8px; } .admin-table input[type=number] { width:66px; padding:6px 8px; } .admin-table select { padding:6px 4px; }
+  .admin-table th, .admin-table td { padding:8px 6px; }
+  .admin-table .acts { display:flex; gap:6px; }
+  .report { background:var(--bg2); border-radius:14px; padding:16px; display:grid; gap:8px; }
+  .report.closed { opacity:.6; }
+  .report blockquote { margin:0; padding:10px 12px; background:var(--bg); border-radius:8px; white-space:pre-wrap; word-break:break-word; }
+  .switch { display:flex; gap:14px; align-items:center; padding:14px 0; border-top:1px solid var(--line); }
+  .switch:first-child { border:0; } .switch div { flex:1; } .switch small { display:block; color:var(--mute); }
+  .toggle { appearance:none; width:46px; height:26px; border-radius:99px; background:var(--line); position:relative; cursor:pointer; border:0; padding:0; flex:none; transition:background .15s; }
+  .toggle::after { content:""; position:absolute; top:3px; left:3px; width:20px; height:20px; border-radius:50%; background:#fff; transition:left .15s; }
+  .toggle:checked { background:var(--go); } .toggle:checked::after { left:23px; }
+
+  /* modal + toast */
+  .backdrop { position:fixed; inset:0; z-index:100; background:rgba(4,8,16,.7); display:grid; place-items:center; padding:16px; }
+  .modal { background:var(--panel); border-radius:18px; padding:24px; width:min(460px, 100%); display:flex; flex-direction:column; gap:14px; box-shadow:0 30px 70px rgba(0,0,0,.6); }
+  .modal header { display:flex; justify-content:space-between; align-items:center; }
+  .modal label { display:flex; flex-direction:column; gap:6px; font-weight:700; font-size:14px; }
+  .radios { display:grid; gap:8px; } .radios label { flex-direction:row; align-items:center; gap:10px; background:var(--bg2); padding:10px 12px; border-radius:10px; font-weight:600; cursor:pointer; }
+  .days { display:grid; grid-template-columns:repeat(7, 1fr); gap:6px; }
+  .days div { background:var(--bg2); border-radius:10px; padding:10px 4px; text-align:center; font-size:12px; color:var(--mute); border:2px solid transparent; }
+  .days div b { display:block; color:var(--fg); font-size:15px; } .days .done { opacity:.5; } .days .today { border-color:var(--warn); color:var(--warn); }
+  #toasts { position:fixed; top:74px; left:50%; transform:translateX(-50%); z-index:200; display:flex; flex-direction:column; gap:8px; align-items:center; }
+  .toast { background:var(--panel2); border-left:4px solid var(--go); padding:12px 18px; border-radius:10px; box-shadow:0 10px 30px rgba(0,0,0,.5); font-weight:600; }
+  .toast.bad { border-color:var(--bad); }
+
+  @media (max-width:760px) {
+    #top { gap:10px; padding:0 12px; } #top nav a { padding:8px 6px; font-size:12px; } .logo b { display:none; }
+    #v-auth .wrap { grid-template-columns:1fr; } .hero { padding:30px 22px; }
+    .versus { grid-template-columns:1fr; } .vs { justify-self:center; }
+    #guessbox, #guessbox:hover, #guessbox.pinned { width:calc(100vw - 24px); right:12px; bottom:12px; }
+    .hud { right:auto; left:50%; transform:translateX(-50%); top:60px; } .hud div { padding:6px 10px; }
+    .chip { padding:4px; } .chip span { display:none; } #top .right { gap:4px; } #top nav { overflow-x:auto; }
+    #mylobbies td:nth-child(4) { display:none; }
+  }
 </style>
 </head>
 <body>
-<header><b>🌍 Better Guesser</b><span id="hud"></span><nav id="nav"></nav></header>
-<main>
-  <section id="v-auth"><div class="card" style="max-width:360px">
-    <h2>Welcome</h2>
-    <form id="authform" style="display:flex;flex-direction:column;gap:10px">
-      <input id="username" placeholder="Username" autocomplete="username" required>
-      <input id="password" type="password" placeholder="Password" autocomplete="current-password" required>
-      <div style="display:flex;gap:8px"><button>Log in</button><button type="button" class="ghost" id="signup">Sign up</button></div>
-      <div class="msg" id="authmsg"></div>
-    </form>
+<header id="top" class="hidden">
+  <a class="logo" href="#/play"><span class="logo-ic"></span><b>BETTER<span>GUESSER</span></b></a>
+  <nav>
+    <a href="#/play" data-nav="play">Play</a>
+    <a href="#/leaderboards" data-nav="leaderboards">Leaderboards</a>
+    <a href="#/profile" data-nav="profile">Profile</a>
+  </nav>
+  <div class="right">
+    <button class="iconbtn gift" id="gift" aria-label="Daily reward"></button>
+    <a class="chip" id="rankchip" href="#/profile"></a>
+    <div class="menu">
+      <button class="iconbtn" id="menubtn" aria-label="Account menu" aria-expanded="false"></button>
+      <div class="menu-pop hidden" id="menupop"></div>
+    </div>
   </div>
-  <div class="card" style="max-width:520px"><h2>👑 Legend Division</h2><table><thead><tr><th>#</th><th>Legend</th><th class="num">MMR</th><th class="num">Matches</th></tr></thead><tbody class="legends"></tbody></table></div></section>
+</header>
 
-  <section id="v-home"><div class="card">
-    <p>You get dropped somewhere on Earth. Look around, then pin where you think you are. 5 rounds, up to 1000 points each.</p>
-    <div id="daily" class="daily" hidden></div>
-    <div class="modes">
-      <div class="mode"><h3>🏆 Ranked 1v1</h3><p id="rankline"></p>
-        <button id="ranked" data-queue="ranked">Find ranked match</button> <button id="legend-enter" class="ghost" hidden>👑 Enter Legend Division</button>
-        <p class="hint">Get matched with a player near your rank. You both play the same 5 places, and the higher total wins.</p></div>
-      <div class="mode"><h3>⚔️ 1v1</h3><button data-queue="1v1">Find match</button> <button class="ghost" data-mode="1v1">+ Private lobby</button>
-        <p class="hint">Find match pairs you with a random player. Private lobby: send a friend the code. Doesn't affect rank.</p></div>
-      <div class="mode"><h3>👥 2v2</h3><button data-queue="2v2">Find match</button> <button class="ghost" data-mode="2v2">+ Private lobby</button>
-        <p class="hint">Two teams of two. A team's score is the sum of both players' scores. Doesn't affect rank.</p></div>
-    </div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px">
-      <form id="joinform" style="display:flex;gap:6px"><input id="joincode" placeholder="Lobby code" maxlength="6" size="9" aria-label="Lobby code"><button>Join lobby</button></form>
-      <button id="play" class="ghost">Practice solo</button> <span class="msg" id="homemsg"></span>
-    </div>
-    <h2>Your matches</h2>
-    <ul id="mylobbies"></ul>
-    <h2>👑 Legend Division</h2>
-    <table><thead><tr><th>#</th><th>Legend</th><th class="num">MMR</th><th class="num">Matches</th></tr></thead><tbody class="legends"></tbody></table>
-    <h2>Best games</h2>
-    <table><thead><tr><th>#</th><th>Player</th><th class="num">Best game</th><th class="num">Games</th><th class="num">All-time points</th></tr></thead><tbody id="lb"></tbody></table>
-  </div></section>
-
-  <section id="v-lobby"><div class="card">
-    <h2>Lobby <span id="l-code" style="color:var(--acc);letter-spacing:3px"></span> <small id="l-mode" style="color:var(--mute)"></small></h2>
-    <p id="l-info"></p>
-    <div id="l-teams" style="display:flex;gap:8px;margin-bottom:12px"></div>
-    <table><thead><tr><th>Player</th><th>Team</th><th class="num">Rounds</th><th class="num">Score</th></tr></thead><tbody id="l-members"></tbody></table>
-    <p style="display:flex;gap:8px;margin-top:16px"><button id="l-start" hidden>Start lobby</button><button id="l-play" hidden>▶ Play</button></p>
-    <div class="msg" id="l-msg"></div>
-  </div></section>
-
-  <section id="v-game">
-    <div id="pano"></div>
-    <div id="guessbox">
-      <div id="gmap"></div>
-      <div class="row"><button id="guess" disabled>Guess</button><button id="peek" class="ghost" title="Peek" hidden>👁</button><button id="aim" class="ghost" title="Auto-guess" hidden>🎯</button></div>
+<main>
+  <section id="v-auth">
+    <div class="wrap">
+      <div class="hero" style="margin:0;min-height:100%">
+        <svg class="globe" viewBox="0 0 200 200" fill="none" stroke="#fff" stroke-width="1"><circle cx="100" cy="100" r="96"/><ellipse cx="100" cy="100" rx="40" ry="96"/><ellipse cx="100" cy="100" rx="75" ry="96"/><path d="M4 100h192M14 55h172M14 145h172M40 22h120M40 178h120"/></svg>
+        <div class="logo" style="margin-bottom:26px"><span class="logo-ic"></span><b>BETTER<span>GUESSER</span></b></div>
+        <h1>Drop in.<br>Look around.<br>Guess where.</h1>
+        <p>Real street-level imagery from all over the world. Climb from Bronze to Master in ranked duels, team up in 2v2, and fight for a spot in the Legend Division.</p>
+      </div>
+      <div class="grid">
+        <div class="panel">
+          <h2 style="margin-bottom:14px">Play now</h2>
+          <form id="authform">
+            <input id="username" placeholder="Username" autocomplete="username" required aria-label="Username">
+            <input id="password" type="password" placeholder="Password" autocomplete="current-password" required aria-label="Password">
+            <div class="row"><button class="btn">Log in</button><button type="button" class="btn ghost" id="signup">Create account</button></div>
+            <div class="err" id="authmsg" role="alert"></div>
+          </form>
+        </div>
+        <div class="panel"><h3 style="margin-bottom:8px">Legend Division</h3><table><tbody class="legends"></tbody></table></div>
+      </div>
     </div>
   </section>
 
-  <section id="v-result">
-    <div id="rmap"></div>
-    <div class="card" style="text-align:center"><h2 id="rtext"></h2><p id="rsub"></p><button id="next">Next round</button></div>
+  <section id="v-home">
+    <div class="hero">
+      <svg class="globe" viewBox="0 0 200 200" fill="none" stroke="#fff" stroke-width="1"><circle cx="100" cy="100" r="96"/><ellipse cx="100" cy="100" rx="40" ry="96"/><ellipse cx="100" cy="100" rx="75" ry="96"/><path d="M4 100h192M14 55h172M14 145h172M40 22h120M40 178h120"/></svg>
+      <h1 id="hello"></h1>
+      <p>Five rounds per game, up to 1,000 points each. The closer your pin, the bigger the score.</p>
+    </div>
+    <div class="grid modes">
+      <div class="tile" style="--accent:var(--warn)">
+        <div class="icon" data-ic="trophy"></div>
+        <h2>Ranked duel</h2>
+        <div id="rankbox"></div>
+        <p>1v1 against a player near your rank. Beat stronger players and win big to climb faster.</p>
+        <div class="actions"><button class="btn" data-queue="ranked" id="rankedbtn">Find match</button><button class="btn ghost hidden" id="legend-enter">Enter Legend</button></div>
+      </div>
+      <div class="tile" style="--accent:var(--blue)">
+        <div class="icon" data-ic="swords"></div>
+        <h2>Duel</h2>
+        <p>Head-to-head on the same five locations. Unranked, so just for bragging rights.</p>
+        <div class="actions"><button class="btn" data-queue="1v1">Find match</button><button class="link" data-mode="1v1">Private lobby</button></div>
+      </div>
+      <div class="tile" style="--accent:#c77dff">
+        <div class="icon" data-ic="users"></div>
+        <h2>Team duel</h2>
+        <p>2 vs 2. Both your scores add up, so carry your teammate or get carried.</p>
+        <div class="actions"><button class="btn" data-queue="2v2">Find match</button><button class="link" data-mode="2v2">Private lobby</button></div>
+      </div>
+    </div>
+    <div class="strip">
+      <span class="mute" style="font-weight:700">Got a code from a friend?</span>
+      <form id="joinform"><input id="joincode" placeholder="CODE" maxlength="6" aria-label="Lobby code"><button class="btn ghost">Join</button></form>
+      <span style="flex:1"></span>
+      <button class="btn ghost" id="practice"><span data-ic="globe"></span>Practice solo</button>
+    </div>
+    <div class="panel" style="margin-top:16px">
+      <h2 style="margin-bottom:10px">Your matches</h2>
+      <table><tbody id="mylobbies"></tbody></table>
+    </div>
   </section>
+
+  <section id="v-boards">
+    <h1 style="margin-bottom:18px">Leaderboards</h1>
+    <div class="tabs" id="boardtabs">
+      <button data-tab="legend" class="on">Legend Division</button><button data-tab="ranked">Ranked</button><button data-tab="best">Best games</button>
+    </div>
+    <div class="panel"><table id="board"></table></div>
+  </section>
+
+  <section id="v-profile"><div id="profile"></div></section>
+
+  <section id="v-lobby"><div id="lobby"></div></section>
 
   <section id="v-admin">
-    <div class="card" style="max-width:1300px">
-      <h2>Accounts</h2>
-      <div class="scroll"><table id="admin-table"><thead><tr>
-        <th>ID</th><th>Username</th><th>Created</th><th>Last login</th><th>Last IP</th><th class="num">Sessions</th>
-        <th class="num">Games</th><th class="num">Best</th><th class="num">Points</th>
-        <th>Admin</th><th>Banned</th><th title="Can peek at the answer">Peek cheat</th><th title="Score multiplier">× Score</th><th title="Auto-guess button">Aimbot</th><th title="Minimum points per round (0-1000)">Score floor</th><th title="Never lose RP/MMR">Rank shield</th><th>RP</th><th>Legend</th><th>MMR</th><th>Streak</th><th></th>
-      </tr></thead><tbody></tbody></table></div>
-      <div class="msg" id="adminmsg"></div>
-      <h2>Settings</h2>
-      <form id="settings" style="display:flex;flex-direction:column;gap:10px;max-width:520px">
-        <label>Mapillary client token (get one free at mapillary.com/dashboard/developers)<br><input id="s-token" style="width:100%"></label>
-        <label><input type="checkbox" id="s-reg"> Allow new sign-ups</label>
-        <div><button>Save settings</button></div>
-      </form>
+    <h1 style="margin-bottom:18px">Admin</h1>
+    <div class="tabs" id="admintabs">
+      <button data-tab="accounts" class="on">Accounts</button><button data-tab="reports">Reports</button>
+      <button data-tab="cheats">My cheats</button><button data-tab="settings">Settings</button>
     </div>
+    <div id="admin"></div>
   </section>
 </main>
 
+<section id="v-game">
+  <div id="pano"></div>
+  <button class="btn ghost sm" id="quit">Leave</button>
+  <div class="hud"><div><span>Mode</span><b id="hud-mode"></b></div><div><span>Round</span><b id="hud-round"></b></div><div><span>Score</span><b id="hud-score"></b></div></div>
+  <div class="cheatbar hidden" id="cheatbar">
+    <button id="peek" title="Peek: show the answer" aria-label="Peek"></button>
+    <button id="aim" title="Aimbot: place a believable pin" aria-label="Aimbot"></button>
+  </div>
+  <div id="guessbox">
+    <div id="gmap"></div>
+    <button class="btn big" id="guess" disabled>Place your pin</button>
+  </div>
+</section>
+
+<section id="v-result">
+  <div id="rmap"></div>
+  <div class="resultbar" id="resultbar"></div>
+</section>
+
+<div id="toasts" aria-live="polite"></div>
+
 <script>
-const $ = s => document.querySelector(s);
+// ---------- helpers ----------
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
-const when = t => t ? new Date(t * 1000).toLocaleString() : '—';
-const MODES = { ffa: 'free-for-all', '1v1': '1v1', '2v2': '2v2', ranked: 'Ranked 1v1', legend: 'Legend 1v1' };
+const fmt = n => Math.round(n).toLocaleString();
+const ago = t => { const s = Date.now() / 1000 - t; return s < 60 ? 'just now' : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`; };
+const dist = km => km < 1 ? `${Math.round(km * 1000)} m` : `${fmt(km)} km`;
+
+const ICONS = {
+  pin: '<path d="M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/>',
+  trophy: '<path d="M8 4h8v5a4 4 0 0 1-8 0zM8 6H5c0 2 1.3 3.6 3 4M16 6h3c0 2-1.3 3.6-3 4M12 13v4M8 20h8M10 17h4"/>',
+  swords: '<path d="M14.5 17.5 3 6V3h3l11.5 11.5M13 19l6-6M16 16l4 4M19 21l2-2M9.5 17.5 21 6V3h-3L6.5 14.5M11 19l-6-6M8 16l-4 4M5 21l-2-2"/>',
+  users: '<circle cx="9" cy="8" r="3.2"/><path d="M3 20a6 6 0 0 1 12 0"/><circle cx="17" cy="9" r="2.6"/><path d="M15.5 14.3A5 5 0 0 1 21 19.5"/>',
+  gift: '<rect x="3" y="8" width="18" height="4" rx="1"/><path d="M5 12v9h14v-9M12 8v13M12 8S10.5 3.5 8 4.2 8.5 8 12 8zm0 0s1.5-4.5 4-3.8S15.5 8 12 8z"/>',
+  flag: '<path d="M5 21V4M5 4h12l-2.5 4L17 12H5"/>',
+  target: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>',
+  eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+  copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>',
+  x: '<path d="M6 6l12 12M18 6 6 18"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+  key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/>',
+  shield: '<path d="M12 3 20 6v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/>',
+  logout: '<path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h11"/>',
+  check: '<path d="M5 12l5 5 9-10"/>',
+};
+const ic = (n, size = 20) => `<svg class="ic" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n]}</svg>`;
+function paintIcons(root = document) { $$('[data-ic]', root).forEach(el => { el.innerHTML = ic(el.dataset.ic, el.classList.contains('icon') ? 26 : 18) + el.innerHTML; delete el.dataset.ic; }); }
+
+const TIERS = { Bronze: '#c9814f', Silver: '#b9c5d8', Gold: '#f2c14e', Platinum: '#4fd1c5', Diamond: '#7aa2ff', Master: '#c77dff', Legend: '#ff5d73' };
+const badge = (rank, size = 26) => `<svg class="ic" width="${size}" height="${size}" viewBox="0 0 32 32" role="img" aria-label="${rank}"><title>${rank}</title>
+  <path d="M16 1.5 29 6.5v9.5c0 7.5-5.8 12.6-13 14.5C8.8 28.6 3 23.5 3 16V6.5z" fill="${TIERS[rank] || '#888'}"/>
+  <path d="M16 5 25.5 8.7v7.3c0 5.6-4.2 9.5-9.5 11-5.3-1.5-9.5-5.4-9.5-11V8.7z" fill="rgba(0,0,0,.2)"/>
+  <text x="16" y="21" text-anchor="middle" font-size="13" font-weight="900" font-family="system-ui" fill="#fff">${rank === 'Legend' ? '★' : rank[0]}</text></svg>`;
+const AV_COLORS = ['#29d398', '#5b8cff', '#ffb648', '#c77dff', '#ff7a59', '#4fd1c5', '#f2c14e'];
+const avatar = name => `<div class="avatar" style="background:${AV_COLORS[[...name].reduce((a, c) => a + c.charCodeAt(0), 0) % AV_COLORS.length]}">${esc(name[0].toUpperCase())}</div>`;
+const plink = name => `<a class="player" href="#/profile/${encodeURIComponent(name)}">${esc(name)}</a>`;
+const MODES = { solo: 'Practice', ffa: 'Lobby', '1v1': 'Duel', '2v2': 'Team duel', ranked: 'Ranked', legend: 'Legend' };
 const SEATS = { ranked: 2, legend: 2, '1v1': 2, '2v2': 4 };
-const ranked = m => m === 'ranked' || m === 'legend';
-const signed = (d, unit) => d == null ? '' : ` (${d > 0 ? '+' : ''}${d} ${unit})`;
-let me = null, game = null, lobbyCode = null, lobbyTimer = null, viewer = null, gmap = null, rmap = null, guessMarker = null, peekMarker = null, rLayer = null;
+const isRated = m => m === 'ranked' || m === 'legend';
+const deltaTxt = (d, mode) => d == null ? '' : `<span class="${d > 0 ? 'delta-up' : d < 0 ? 'delta-down' : 'mute'}">${d > 0 ? '+' : ''}${Math.round(d)} ${mode === 'legend' ? 'MMR' : 'RP'}</span>`;
+const resultPill = r => r == null ? '' : `<span class="pill ${r === 1 ? 'win' : r === 0 ? 'loss' : 'draw'}">${r === 1 ? 'Win' : r === 0 ? 'Loss' : 'Draw'}</span>`;
 
 async function api(path, body) {
   const opt = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
   const r = await fetch('api/' + path, opt);  // relative: works when installed under a sub-path
   const j = await r.json().catch(() => ({ error: r.statusText }));
+  if (r.status === 401 && me && path !== 'login') { me = null; start(); }
   if (!r.ok) throw new Error(j.error || r.status);
   return j;
 }
+function toast(msg, bad = false) {
+  const t = document.createElement('div'); t.className = 'toast' + (bad ? ' bad' : ''); t.textContent = msg;
+  $('#toasts').append(t); setTimeout(() => t.remove(), 3800);
+}
+const fail = e => toast(e.message, true);
+function modal(title, body, onMount, onClose) {
+  const b = document.createElement('div'); b.className = 'backdrop';
+  b.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}"><header><h2>${esc(title)}</h2><button class="iconbtn" data-close aria-label="Close">${ic('x')}</button></header>${body}</div>`;
+  const close = () => { b.remove(); document.removeEventListener('keydown', onKey); onClose?.(); };
+  const onKey = e => e.key === 'Escape' && close();
+  b.addEventListener('click', e => { if (e.target === b || e.target.closest('[data-close]')) close(); });
+  document.addEventListener('keydown', onKey);
+  document.body.append(b);
+  onMount?.(b.firstElementChild, close);
+  $('input, textarea, button.btn', b)?.focus();
+  return close;
+}
+const confirmBox = (title, text, ok = 'Confirm', danger = true) => new Promise(res => {
+  let yes = false;
+  modal(title, `<p class="mute" style="margin:0">${esc(text)}</p><div class="row" style="justify-content:flex-end"><button class="btn ghost" data-close>Cancel</button><button class="btn ${danger ? 'danger' : ''}" id="ok">${esc(ok)}</button></div>`,
+    (m, close) => $('#ok', m).onclick = () => { yes = true; close(); }, () => res(yes));
+});
+
+// ---------- state & routing ----------
+let me = null, game = null, viewer = null, gmap = null, rmap = null, guessMarker = null, peekMarker = null, rLayer = null, lobbyTimer = null;
 
 function show(id) {
   clearInterval(lobbyTimer);
-  document.querySelectorAll('main > section').forEach(s => s.classList.toggle('on', s.id === id));
-  if (id !== 'v-game' && id !== 'v-result') $('#hud').textContent = '';
+  $$('main > section, #v-game, #v-result').forEach(s => s.classList.toggle('on', s.id === id));
+  document.body.classList.toggle('ingame', id === 'v-game' || id === 'v-result');
+  window.scrollTo(0, 0);
 }
-
-function nav() {
-  $('#nav').innerHTML = me ? `<span>${esc(me.username)}</span><button class="ghost" data-go="home">Home</button>` +
-    (me.is_admin ? '<button class="ghost" data-go="admin">Admin</button>' : '') + '<button class="ghost" data-go="logout">Log out</button>' : '';
+function nav(hash) { location.hash === hash ? route() : (location.hash = hash); }
+async function route() {
+  if (!me) return;
+  const [, page = 'play', arg = ''] = location.hash.match(/^#\/([^/]*)\/?(.*)$/) || [];
+  $$('#top nav a').forEach(a => a.classList.toggle('on', a.dataset.nav === page && (page !== 'profile' || !arg || arg === me.username)));
+  try {
+    if (page === 'leaderboards') await boards();
+    else if (page === 'profile') await profile(decodeURIComponent(arg) || me.username);
+    else if (page === 'lobby' && arg) await lobby(arg);
+    else if (page === 'admin' && me.is_admin) await admin();
+    else await home();
+  } catch (e) { fail(e); }
 }
-$('#nav').onclick = async e => {
-  const go = e.target.dataset.go;
-  if (go === 'home') home();
-  if (go === 'admin') admin();
-  if (go === 'logout') { await api('logout', {}); me = null; start(); }
-};
+window.addEventListener('hashchange', route);
 
 async function start() {
   try { me = await api('me'); } catch { me = null; }
-  nav();
-  me ? home() : (show('v-auth'), legends());
+  $('#top').classList.toggle('hidden', !me);
+  if (!me) { show('v-auth'); legendsInto($('#v-auth .legends'), 8); return; }
+  topbar();
+  route();
+}
+async function refreshMe() { me = await api('me'); topbar(); }
+
+function topbar() {
+  const rank = me.legend ? 'Legend' : me.rank;
+  $('#rankchip').innerHTML = `${badge(rank, 24)}<span>${rank}</span><span class="rp mute">${me.legend ? fmt(me.mmr) + ' MMR' : me.rank_points + ' RP'}</span>`;
+  $('#gift').innerHTML = ic('gift', 22);
+  $('#gift').classList.toggle('ready', me.daily_available);
+  $('#menubtn').innerHTML = avatar(me.username);
+  $('#menupop').innerHTML = `<div style="padding:8px 12px 10px"><b>${esc(me.username)}</b></div>
+    <a href="#/profile">${ic('user', 18)}Profile</a>
+    ${me.is_admin ? `<a href="#/admin">${ic('shield', 18)}Admin${me.open_reports ? `<span class="count">${me.open_reports}</span>` : ''}</a>` : ''}
+    <button data-act="password">${ic('key', 18)}Change password</button>
+    <button data-act="logout">${ic('logout', 18)}Log out</button>`;
+}
+$('#menubtn').onclick = e => { e.stopPropagation(); const p = $('#menupop'); p.classList.toggle('hidden'); $('#menubtn').setAttribute('aria-expanded', !p.classList.contains('hidden')); };
+document.addEventListener('click', () => $('#menupop').classList.add('hidden'));
+$('#menupop').onclick = async e => {
+  const act = e.target.closest('[data-act]')?.dataset.act;
+  if (act === 'logout') { await api('logout', {}); me = null; location.hash = ''; start(); }
+  if (act === 'password') changePassword();
+};
+$$('.logo-ic').forEach(el => el.innerHTML = `<svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s-8-7-8-12.5a8 8 0 0 1 16 0C20 15 12 22 12 22z" fill="#29d398"/><circle cx="12" cy="9.5" r="3" fill="#0d1321"/></svg>`);
+
+function changePassword() {
+  modal('Change password', `<label>Current password<input type="password" id="pw-old" autocomplete="current-password"></label>
+    <label>New password<input type="password" id="pw-new" autocomplete="new-password" minlength="6"></label>
+    <div class="err" id="pw-err"></div><button class="btn" id="pw-save">Save</button>`, (m, close) => {
+    $('#pw-save', m).onclick = async () => {
+      try { await api('password', { old: $('#pw-old', m).value, new: $('#pw-new', m).value }); close(); toast('Password changed. Other devices were logged out.'); }
+      catch (e) { $('#pw-err', m).textContent = e.message; }
+    };
+  });
 }
 
 // ---------- auth ----------
 async function auth(kind) {
   $('#authmsg').textContent = '';
-  try { await api(kind, { username: $('#username').value, password: $('#password').value }); start(); }
+  try { await api(kind, { username: $('#username').value.trim(), password: $('#password').value }); location.hash = '#/play'; start(); }
   catch (e) { $('#authmsg').textContent = e.message; }
 }
 $('#authform').onsubmit = e => { e.preventDefault(); auth('login'); };
 $('#signup').onclick = () => auth('register');
 
-// ---------- home ----------
-async function legends() {
-  const { rows } = await api('legends');
-  document.querySelectorAll('.legends').forEach(t => t.innerHTML = rows.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.username)}</td>` +
-    `<td class="num">${r.mmr}</td><td class="num">${r.matches}</td></tr>`).join('') || '<tr><td colspan="4">Nobody has reached Legend Division yet.</td></tr>');
-}
+// ---------- daily reward ----------
+$('#gift').onclick = () => {
+  const d = me.daily_next, unit = d.unit, per = me.legend ? 1 : 5;
+  const done = i => me.daily_available ? i < d.day : (d.day === 1 ? true : i < d.day);
+  const cells = [1, 2, 3, 4, 5, 6, 7].map(i => `<div class="${done(i) ? 'done' : ''} ${me.daily_available && i === d.day ? 'today' : ''}">Day ${i}<b>+${i * per}</b>${unit}</div>`).join('');
+  modal('Daily reward', `<p class="mute" style="margin:0">Come back every day to grow your reward. Miss a day and the streak starts over.</p>
+    <div class="days">${cells}</div>
+    <div class="row" style="justify-content:space-between"><span><b>${me.daily_streak}</b> <span class="mute">day streak</span></span>
+    ${me.daily_available ? `<button class="btn" id="claim">Claim +${d.amount} ${unit}</button>` : `<span class="mute">Next reward tomorrow: +${d.amount} ${unit}</span>`}</div>`, (m, close) => {
+    const c = $('#claim', m);
+    if (c) c.onclick = async () => {
+      try { const r = await api('daily', {}); close(); toast(`+${r.amount} ${r.unit} claimed. ${r.streak}-day streak!`); await refreshMe(); route(); }
+      catch (e) { fail(e); }
+    };
+  });
+};
 
+// ---------- home ----------
 async function home() {
   show('v-home');
-  me = await api('me');
-  $('#rankline').innerHTML = me.legend ? `<b>👑 Legend</b> · ${me.mmr} MMR`
-    : `<b>${me.rank}</b> · ${me.rank_points} RP` + (me.next_rank_at ? ` <span class="hint">(${me.next_rank_at - me.rank_points} RP to the next rank)</span>` : '');
-  $('#ranked').textContent = me.legend ? 'Find Legend match' : 'Find ranked match';
-  $('#legend-enter').hidden = !me.legend_eligible || me.legend;
-  const d = me.daily_next;
-  $('#daily').hidden = false;
-  $('#daily').innerHTML = me.daily_available
-    ? `<span>🎁 <b>Daily reward</b> · Day ${d.day} of 7${me.daily_streak ? ` · 🔥 ${me.daily_streak}-day streak` : ''}</span><button id="claim">Claim +${d.amount} ${d.unit}</button>`
-    : `<span>🎁 Daily reward claimed · 🔥 ${me.daily_streak}-day streak. Come back tomorrow for +${d.amount} ${d.unit}.</span>`;
-  legends();
-  const { rows } = await api('leaderboard');
-  api('lobbies').then(({ lobbies }) => $('#mylobbies').innerHTML = lobbies.map(l =>
-    `<li><a href="#" data-code="${l.code}">${l.code}</a> · ${MODES[l.mode]} · ` + (l.matchmade
-      ? (l.settled ? `done${signed(l.delta, l.mode === 'legend' ? 'MMR' : 'RP')}` : l.players < SEATS[l.mode] ? 'waiting for players' : 'matched')
-      : `host ${esc(l.host)} · ${l.players} players${l.started ? '' : ' · waiting'}`) + '</li>').join('') || '<li class="hint">No matches yet.</li>');
-  $('#lb').innerHTML = rows.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.username)}</td><td class="num">${r.best}</td>` +
-    `<td class="num">${r.games}</td><td class="num">${r.points}</td></tr>`).join('');
+  await refreshMe();
+  $('#hello').textContent = `Welcome back, ${me.username}`;
+  const rank = me.legend ? 'Legend' : me.rank;
+  const prevFloor = me.next_rank_at ? me.next_rank_at - 100 : 500;
+  $('#rankbox').innerHTML = `<div class="row" style="gap:10px">${badge(rank, 40)}<div><div class="display" style="font-size:20px">${rank}</div>
+    <div class="mute small">${me.legend ? `${fmt(me.mmr)} MMR` : me.next_rank_at ? `${me.rank_points} RP · ${me.next_rank_at - me.rank_points} to next rank` : `${me.rank_points} RP · top rank reached`}</div></div></div>
+    ${me.legend || !me.next_rank_at ? '' : `<div class="progress" style="margin-top:10px"><i style="width:${(me.rank_points - prevFloor) / 100 * 100}%"></i></div>`}`;
+  $('#legend-enter').classList.toggle('hidden', !me.legend_eligible || me.legend);
+  const { lobbies } = await api('lobbies');
+  $('#mylobbies').innerHTML = lobbies.map(l => {
+    const status = l.result != null ? resultPill(l.result)
+      : l.settled ? '<span class="pill draw">Expired</span>'
+      : l.matchmade && l.players < SEATS[l.mode] ? '<span class="pill wait">Searching</span>'
+      : !l.started ? '<span class="pill wait">Lobby</span>' : '<span class="pill wait">In progress</span>';
+    return `<tr><td style="width:90px">${status}</td><td><b>${MODES[l.mode]}</b> <span class="mute small">${l.matchmade ? '' : 'private · '}${l.players}/${SEATS[l.mode] ?? l.players} players</span></td>
+      <td>${deltaTxt(l.delta, l.mode)}</td><td class="mute small">${ago(l.created)}</td><td class="num"><a class="btn sm ghost" href="#/lobby/${l.code}">Open</a></td></tr>`;
+  }).join('') || '<tr><td class="empty">No matches yet. Hit Find match above to play your first one.</td></tr>';
 }
-$('#play').onclick = async () => {
-  $('#play').disabled = true; $('#homemsg').textContent = 'Finding a spot…';
-  try { lobbyCode = null; game = await api('game', {}); $('#homemsg').textContent = ''; round(); }
-  catch (e) { $('#homemsg').textContent = e.message; }
-  $('#play').disabled = false;
-};
-
-// ---------- lobbies ----------
-document.querySelectorAll('[data-queue]').forEach(b => b.onclick = async () => {
-  b.disabled = true; $('#homemsg').textContent = 'Finding a match…';
-  try {
-    lobbyCode = (await api('queue', { mode: b.dataset.queue })).code;
-    game = await api(`lobby/${lobbyCode}/play`, {});
-    $('#homemsg').textContent = '';
-    game.done ? lobby(lobbyCode) : round();
-  } catch (e) { $('#homemsg').textContent = e.message; }
-  b.disabled = false;
-});
-$('#daily').onclick = async e => {
-  if (e.target.id !== 'claim') return;
-  try { await api('daily', {}); home(); } catch (err) { $('#homemsg').textContent = err.message; }
-};
 $('#legend-enter').onclick = async () => {
-  try { await api('legend/enter', {}); home(); } catch (e) { $('#homemsg').textContent = e.message; }
+  if (!await confirmBox('Enter Legend Division', 'You\'ll only face other legends from now on, and play for MMR on the public Legend leaderboard. There\'s no way back down.', 'Enter', false)) return;
+  try { await api('legend/enter', {}); toast('Welcome to the Legend Division.'); home(); } catch (e) { fail(e); }
 };
-document.querySelectorAll('[data-mode]').forEach(b => b.onclick = async () => {
-  try { lobby((await api('lobby', { mode: b.dataset.mode })).code); } catch (e) { $('#homemsg').textContent = e.message; }
+$$('[data-queue]').forEach(b => b.onclick = async () => {
+  b.disabled = true; const label = b.textContent; b.textContent = 'Searching…';
+  try {
+    const { code } = await api('queue', { mode: b.dataset.queue });
+    game = await api(`lobby/${code}/play`, {});
+    game.done ? nav('#/lobby/' + code) : round();
+  } catch (e) { fail(e); }
+  b.disabled = false; b.textContent = label;
+});
+$$('[data-mode]').forEach(b => b.onclick = async () => {
+  try { nav('#/lobby/' + (await api('lobby', { mode: b.dataset.mode })).code); } catch (e) { fail(e); }
 });
 $('#joinform').onsubmit = async e => {
   e.preventDefault();
-  try { lobby((await api('lobby/join', { code: $('#joincode').value })).code); } catch (err) { $('#homemsg').textContent = err.message; }
+  try { nav('#/lobby/' + (await api('lobby/join', { code: $('#joincode').value })).code); $('#joincode').value = ''; } catch (err) { fail(err); }
 };
-$('#mylobbies').onclick = e => { if (e.target.dataset.code) { e.preventDefault(); lobby(e.target.dataset.code); } };
+$('#practice').onclick = async () => {
+  try { game = await api('game', {}); round(); } catch (e) { fail(e); }
+};
 
+// ---------- leaderboards ----------
+async function legendsInto(tbody, limit = 100) {
+  try {
+    const { rows } = await api('legends');
+    tbody.innerHTML = rows.slice(0, limit).map((r, i) => `<tr class="${r.username === me?.username ? 'me' : ''}"><td class="pos">#${i + 1}</td>
+      <td>${badge('Legend', 22)} ${me ? plink(r.username) : `<b>${esc(r.username)}</b>`}</td><td class="num"><b>${fmt(r.mmr)}</b> <span class="mute small">MMR</span></td>
+      <td class="num mute small">${r.matches} matches</td></tr>`).join('') || '<tr><td class="empty">Nobody has reached the Legend Division yet. Be the first.</td></tr>';
+  } catch (e) { tbody.innerHTML = ''; }
+}
+let boardTab = 'legend';
+async function boards() {
+  show('v-boards');
+  $$('#boardtabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === boardTab));
+  const t = $('#board');
+  if (boardTab === 'legend') { t.innerHTML = '<thead><tr><th>#</th><th>Player</th><th class="num">MMR</th><th class="num">Matches</th></tr></thead><tbody></tbody>'; return legendsInto($('tbody', t)); }
+  if (boardTab === 'ranked') {
+    const { rows } = await api('ranked-board');
+    t.innerHTML = '<thead><tr><th>#</th><th>Player</th><th>Rank</th><th class="num">RP</th></tr></thead><tbody>' + (rows.map((r, i) => `<tr class="${r.username === me.username ? 'me' : ''}">
+      <td class="pos">#${i + 1}</td><td>${plink(r.username)}</td><td>${badge(r.rank, 22)} ${r.rank}</td><td class="num"><b>${r.rank_points}</b></td></tr>`).join('')
+      || '<tr><td colspan="4" class="empty">No ranked players yet.</td></tr>') + '</tbody>';
+  } else {
+    const { rows } = await api('leaderboard');
+    t.innerHTML = '<thead><tr><th>#</th><th>Player</th><th class="num">Best game</th><th class="num">Games</th><th class="num">All-time points</th></tr></thead><tbody>' + rows.map((r, i) => `<tr class="${r.username === me.username ? 'me' : ''}">
+      <td class="pos">#${i + 1}</td><td>${plink(r.username)}</td><td class="num"><b>${fmt(r.best)}</b></td><td class="num">${r.games}</td><td class="num">${fmt(r.points)}</td></tr>`).join('') + '</tbody>';
+  }
+}
+$('#boardtabs').onclick = e => { const t = e.target.closest('[data-tab]'); if (t) { boardTab = t.dataset.tab; boards().catch(fail); } };
+
+// ---------- profile ----------
+async function profile(name) {
+  show('v-profile');
+  const p = await api('profile/' + encodeURIComponent(name));
+  const rec = r => `${r.w}W · ${r.l}L${r.d ? ` · ${r.d}D` : ''}`;
+  $('#profile').innerHTML = `<div class="hero" style="display:flex;gap:22px;align-items:center;flex-wrap:wrap">
+      ${badge(p.rank, 84)}
+      <div style="flex:1"><h1>${esc(p.username)}</h1><div class="mute" style="margin-top:6px">${p.rank} · ${p.legend ? fmt(p.mmr) + ' MMR' : p.rank_points + ' RP'} · ${p.joined ? 'joined ' + new Date(p.joined * 1000).toLocaleDateString() : 'original member'}${p.banned ? ' · <span class="pill loss">Banned</span>' : ''}</div></div>
+      ${p.username !== me.username ? `<button class="btn ghost sm" id="report-btn">${ic('flag', 16)}Report</button>` : ''}
+    </div>
+    <div class="grid stats">
+      <div class="stat"><span>Ranked record</span><b>${rec(p.ranked_record)}</b></div>
+      <div class="stat"><span>Casual record</span><b>${rec(p.casual_record)}</b></div>
+      <div class="stat"><span>Games played</span><b>${p.games}</b></div>
+      <div class="stat"><span>Best game</span><b>${fmt(p.best)}</b></div>
+      <div class="stat"><span>Average game</span><b>${fmt(p.avg)}</b></div>
+      <div class="stat"><span>Avg. distance</span><b>${dist(p.avg_km)}</b></div>
+      <div class="stat"><span>Near-perfect rounds</span><b>${p.perfect_rounds}</b></div>
+    </div>
+    <div class="panel" style="margin-top:16px"><h2 style="margin-bottom:10px">Recent matches</h2><table><tbody>
+      ${p.recent.map(m => `<tr><td style="width:80px">${resultPill(m.result)}</td><td><b>${MODES[m.mode]}</b></td><td class="num">${fmt(m.total)} pts</td>
+        <td class="num">${deltaTxt(m.delta, m.mode)}</td><td class="num mute small">${ago(m.created)}</td></tr>`).join('') || '<tr><td class="empty">No finished matches yet.</td></tr>'}
+    </tbody></table></div>`;
+  $('#report-btn')?.addEventListener('click', () => report(p.username));
+}
+
+function report(username, lobbyCode) {
+  modal(`Report ${username}`, `<div class="radios">
+      <label><input type="radio" name="reason" value="cheating" checked> Cheating</label>
+      <label><input type="radio" name="reason" value="name"> Offensive username</label>
+      <label><input type="radio" name="reason" value="abuse"> Harassment or abuse</label>
+      <label><input type="radio" name="reason" value="other"> Something else</label></div>
+    <label>Details <span class="mute small">(optional)</span><textarea id="rep-details" rows="3" maxlength="500" placeholder="What happened?"></textarea></label>
+    <div class="err" id="rep-err"></div><button class="btn danger" id="rep-send">${ic('flag', 18)}Send report</button>`, (m, close) => {
+    $('#rep-send', m).onclick = async () => {
+      try {
+        await api('report', { username, reason: $('input[name=reason]:checked', m).value, details: $('#rep-details', m).value, lobby: lobbyCode });
+        close(); toast('Thanks. The admins will take a look.');
+      } catch (e) { $('#rep-err', m).textContent = e.message; }
+    };
+  });
+}
+
+// ---------- lobby ----------
+let lobbyCode = null;
 async function lobby(code) {
-  lobbyCode = code; show('v-lobby');
+  lobbyCode = code.toUpperCase();
+  show('v-lobby');
   await paintLobby();
-  lobbyTimer = setInterval(paintLobby, 3000);  // shortcut: polling, not websockets; fine for a handful of friends
+  lobbyTimer = setInterval(() => paintLobby().catch(() => {}), 3000);  // shortcut: polling, not websockets; fine for a handful of friends
 }
+function playerCard(l, m, winners) {
+  const mine = m.username === me.username;
+  return `<div class="card ${mine ? 'mine' : ''} ${winners && m.result === 1 ? 'won' : ''}">${avatar(m.username)}
+    <div class="who">${plink(m.username)}<div class="dots">${[1, 2, 3, 4, 5].map(i => `<i class="${i <= m.played ? 'on' : ''}"></i>`).join('')}</div></div>
+    <div class="score">${fmt(m.total)}<div class="small">${deltaTxt(m.delta, l.mode)}</div></div>
+    ${mine ? '' : `<button class="iconbtn" data-report="${esc(m.username)}" aria-label="Report ${esc(m.username)}" title="Report">${ic('flag', 16)}</button>`}</div>`;
+}
+const slot = l => `<div class="card slot ${l.matchmade ? 'searching' : ''}">${l.matchmade ? 'Searching for a player…' : 'Open seat'}</div>`;
 async function paintLobby() {
-  let l;
-  try { l = await api('lobby/' + lobbyCode); } catch (e) { $('#l-msg').textContent = e.message; return; }
-  const duo = l.mode === '2v2', unit = l.mode === 'legend' ? 'MMR' : 'RP';
-  $('#l-code').textContent = l.code; $('#l-mode').textContent = MODES[l.mode];
-  const best = Math.max(...Object.values(l.teams));
-  $('#l-teams').innerHTML = !duo ? '' : ['A', 'B'].map(t => `<div class="card" style="margin:0;flex:1;padding:12px">
-    <b>Team ${t}</b> ${l.finished && l.teams[t] === best ? '🏆' : ''}<br><span style="font-size:24px">${l.teams[t] ?? 0}</span><br>
-    ${!l.started && l.my_team !== t ? `<button class="ghost" data-team="${t}">Switch to ${t}</button>` : ''}</div>`).join('');
-  $('#l-members').innerHTML = l.members.map((m, i) => `<tr><td>${l.finished && !duo && i === 0 && m.total > (l.members[1]?.total ?? -1) ? '🏆 ' : ''}${esc(m.username)}${m.host && !ranked(l.mode) ? ' (host)' : ''}</td>
-    <td>${m.team ?? '—'}</td><td class="num">${m.played}/${l.rounds}</td><td class="num">${m.total}${signed(m.delta, unit)}</td></tr>`).join('');
-  const mine = l.members.find(m => m.username === me.username);
-  $('#l-info').textContent = ranked(l.mode) && l.finished ? (mine.delta > 0 ? '🏆 Victory!' : mine.delta < 0 ? 'Defeat.' : 'Match over.')
-    : l.matchmade && l.members.length < l.seats ? `Matchmaking: ${l.members.length}/${l.seats} players. Others will play the same 5 places, and you can leave this page; the result shows up under Your matches.`
-    : l.finished ? 'Everyone is done. Final results:' : l.started ? 'Started: play your 5 rounds, scores update live.'
-    : l.is_host ? `Share the code ${l.code} with your friends, then press Start.${duo ? ' You need 2 players on each team.' : ''}`
-    : 'Waiting for the host to start…';
-  $('#l-start').hidden = !l.is_host || l.started;
-  $('#l-play').hidden = !l.started || l.my_done;
+  const l = await api('lobby/' + lobbyCode);
+  const team2 = l.mode === '2v2', seats = l.seats || l.members.length;
+  let body;
+  if (team2) {
+    const side = t => { const ms = l.members.filter(m => m.team === t); return `<div class="side"><h3>Team ${t} <b>${fmt(l.teams[t] ?? 0)}</b></h3>
+      ${ms.map(m => playerCard(l, m, l.finished)).join('')}${Array(Math.max(0, 2 - ms.length)).fill(slot(l)).join('')}
+      ${!l.started && l.my_team !== t ? `<button class="btn ghost sm" data-team="${t}">Switch to team ${t}</button>` : ''}</div>`; };
+    body = `<div class="versus">${side('A')}<div class="vs">VS</div>${side('B')}</div>`;
+  } else if (seats === 2) {
+    const [a, b] = [l.members.find(m => m.username === me.username), l.members.find(m => m.username !== me.username)];
+    body = `<div class="versus"><div class="side">${playerCard(l, a, l.finished)}</div><div class="vs">VS</div><div class="side">${b ? playerCard(l, b, l.finished) : slot(l)}</div></div>`;
+  } else {
+    body = `<div class="side" style="margin:22px 0">${l.members.map(m => playerCard(l, m, l.finished)).join('')}</div>`;
+  }
+  const status = l.finished || (l.settled && l.my_result != null)
+    ? (l.my_result === 1 ? '<h1 style="color:var(--go)">Victory</h1>' : l.my_result === 0 ? '<h1 style="color:var(--bad)">Defeat</h1>' : l.my_result === 0.5 ? '<h1>Draw</h1>' : '<h1>Match over</h1>')
+      + (l.expired ? '<p class="mute">The match expired: anyone who didn\'t finish in 24 hours forfeits.</p>' : '')
+    : l.expired ? '<h1>Expired</h1><p class="mute">Nobody else joined within 24 hours.</p>'
+    : !l.started ? `<h1>Lobby</h1><p class="mute">${l.is_host ? `Send your friends this code, then start when everyone's in.${team2 ? ' You need two players on each team.' : ''}` : 'Waiting for the host to start the match…'}</p>`
+    : l.matchmade && l.members.length < seats ? `<h1>Matchmaking</h1><p class="mute">Play your five rounds now. Your opponent${team2 ? 's' : ''} will get the same locations, and the result shows up under Your matches.</p>`
+    : `<h1>${l.my_done ? 'Waiting for the others' : 'Your turn'}</h1><p class="mute">${l.my_done ? 'Scores update live as everyone finishes.' : 'Five rounds. The same locations for everyone.'}</p>`;
+  $('#lobby').innerHTML = `<div class="row" style="justify-content:space-between;align-items:flex-start">
+      <div><div class="mute display small" style="font-size:14px">${MODES[l.mode]}${l.matchmade ? '' : ' · private'}</div>${status}</div>
+      ${l.matchmade ? '' : `<div style="text-align:right"><div class="mute small">Lobby code</div><div class="row" style="gap:6px"><span class="code">${l.code}</span><button class="iconbtn" id="copycode" aria-label="Copy code">${ic('copy')}</button></div></div>`}
+    </div>${body}
+    <div class="row">${l.is_host && !l.started ? '<button class="btn big" id="l-start">Start match</button>' : ''}
+      ${l.started && !l.my_done && !l.settled ? `<button class="btn big" id="l-play">${l.members.find(m => m.username === me.username)?.played ? 'Continue' : 'Play'}</button>` : ''}
+      <a class="btn ghost" href="#/play">Back</a></div>`;
+  $('#copycode')?.addEventListener('click', () => navigator.clipboard?.writeText(l.code).then(() => toast('Code copied')));
+  $('#l-start')?.addEventListener('click', async () => { try { await api(`lobby/${l.code}/start`, {}); paintLobby(); } catch (e) { fail(e); } });
+  $('#l-play')?.addEventListener('click', async () => { try { game = await api(`lobby/${l.code}/play`, {}); game.done ? paintLobby() : round(); } catch (e) { fail(e); } });
 }
-$('#l-teams').onclick = async e => {
-  if (!e.target.dataset.team) return;
-  try { await api('lobby/join', { code: lobbyCode, team: e.target.dataset.team }); $('#l-msg').textContent = ''; paintLobby(); }
-  catch (err) { $('#l-msg').textContent = err.message; }
-};
-$('#l-start').onclick = async () => {
-  try { await api(`lobby/${lobbyCode}/start`, {}); $('#l-msg').textContent = ''; paintLobby(); } catch (e) { $('#l-msg').textContent = e.message; }
-};
-$('#l-play').onclick = async () => {
-  $('#l-play').disabled = true;
-  try { game = await api(`lobby/${lobbyCode}/play`, {}); game.done ? paintLobby() : round(); } catch (e) { $('#l-msg').textContent = e.message; }
-  $('#l-play').disabled = false;
-};
+$('#lobby').addEventListener('click', async e => {
+  const t = e.target.closest('[data-team]'), r = e.target.closest('[data-report]');
+  if (t) try { await api('lobby/join', { code: lobbyCode, team: t.dataset.team }); paintLobby(); } catch (err) { fail(err); }
+  if (r) report(r.dataset.report, lobbyCode);
+});
 
 // ---------- game ----------
-function hud() { $('#hud').textContent = `Round ${game.round ?? game.rounds} / ${game.rounds} · ${game.total} pts`; }
+const tiles = () => L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap', maxZoom: 18 });
+const pinIcon = color => L.divIcon({ className: '', iconSize: [26, 34], iconAnchor: [13, 34],
+  html: `<svg width="26" height="34" viewBox="0 0 26 34"><path d="M13 33S1 20.5 1 12.5a12 12 0 0 1 24 0C25 20.5 13 33 13 33z" fill="${color}" stroke="#fff" stroke-width="2"/><circle cx="13" cy="12.5" r="4.5" fill="#fff"/></svg>` });
 
+function hud() {
+  $('#hud-mode').textContent = MODES[game.mode] || 'Practice';
+  $('#hud-round').textContent = `${game.round ?? game.rounds} / ${game.rounds}`;
+  $('#hud-score').textContent = fmt(game.total);
+}
 function round() {
   show('v-game'); hud();
-  if (!viewer) {
-    viewer = new mapillary.Viewer({ accessToken: game.token, container: 'pano', imageId: game.image_id, component: { cover: false } });
-  } else { viewer.resize(); viewer.moveTo(game.image_id).catch(() => {}); }
+  if (!viewer) viewer = new mapillary.Viewer({ accessToken: game.token, container: 'pano', imageId: game.image_id, component: { cover: false } });
+  else { viewer.resize(); viewer.moveTo(game.image_id).catch(() => toast('This location\'s imagery failed to load. Place your best guess anyway.', true)); }
   if (!gmap) {
-    gmap = L.map('gmap', { worldCopyJump: true }).setView([20, 0], 1);
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(gmap);
+    gmap = L.map('gmap', { worldCopyJump: true, zoomControl: false }).setView([20, 0], 1);
+    tiles().addTo(gmap);
     gmap.on('click', e => {
-      guessMarker ? guessMarker.setLatLng(e.latlng) : (guessMarker = L.marker(e.latlng).addTo(gmap));
-      $('#guess').disabled = false;
+      guessMarker ? guessMarker.setLatLng(e.latlng) : (guessMarker = L.marker(e.latlng, { icon: pinIcon('#29d398') }).addTo(gmap));
+      $('#guess').disabled = false; $('#guess').textContent = 'Guess';
+      $('#guessbox').classList.add('pinned');
     });
     new ResizeObserver(() => gmap.invalidateSize()).observe($('#gmap'));
   }
   [guessMarker, peekMarker].forEach(m => m && m.remove());
   guessMarker = peekMarker = null;
-  $('#guess').disabled = true;
-  $('#peek').hidden = !me.cheat_reveal;
-  $('#aim').hidden = !me.cheat_aim;
+  $('#guess').disabled = true; $('#guess').textContent = 'Place your pin';
+  $('#guessbox').classList.remove('pinned');
+  $('#cheatbar').classList.toggle('hidden', !me.cheat_reveal && !me.cheat_aim);
+  $('#peek').classList.toggle('hidden', !me.cheat_reveal); $('#aim').classList.toggle('hidden', !me.cheat_aim);
   gmap.setView([20, 0], 1);
   setTimeout(() => gmap.invalidateSize());
 }
-
-// Aimbot: drop your pin a believable 2-40 km off the answer, so it doesn't look like a perfect score every time.
+$('#peek').innerHTML = ic('eye'); $('#aim').innerHTML = ic('target');
+$('#peek').onclick = async () => {
+  const a = await api(`game/${game.id}/peek`);
+  peekMarker?.remove();
+  peekMarker = L.circleMarker([a.lat, a.lng], { radius: 4, color: '#ff4fd8', opacity: .7 }).addTo(gmap);
+};
+// Aimbot: drop the pin a believable 2-40 km off the answer, so it doesn't look like a perfect score every time.
 $('#aim').onclick = async () => {
   const a = await api(`game/${game.id}/peek`), km = 2 + Math.random() * 38, dir = Math.random() * 2 * Math.PI;
   const ll = L.latLng(a.lat + km / 111 * Math.cos(dir), a.lng + km / (111 * Math.cos(a.lat * Math.PI / 180)) * Math.sin(dir));
-  guessMarker ? guessMarker.setLatLng(ll) : (guessMarker = L.marker(ll).addTo(gmap));
+  guessMarker ? guessMarker.setLatLng(ll) : (guessMarker = L.marker(ll, { icon: pinIcon('#29d398') }).addTo(gmap));
   gmap.setView(ll, 5);
-  $('#guess').disabled = false;
+  $('#guess').disabled = false; $('#guess').textContent = 'Guess';
 };
-$('#peek').onclick = async () => {
-  const a = await api(`game/${game.id}/peek`);
-  if (peekMarker) peekMarker.remove();
-  peekMarker = L.circleMarker([a.lat, a.lng], { radius: 4, color: '#ff4fd8', opacity: .6 }).addTo(gmap);
+$('#quit').innerHTML = ic('x', 16) + 'Leave';
+$('#quit').onclick = async () => {
+  if (!game.lobby && !await confirmBox('Leave game?', 'Practice games can\'t be resumed.', 'Leave')) return;
+  nav(game.lobby ? '#/lobby/' + game.lobby : '#/play');
 };
+document.addEventListener('keydown', e => {
+  if ($('#v-game').classList.contains('on') && (e.key === ' ' || e.key === 'Enter') && !$('#guess').disabled && !e.target.closest('input, textarea')) { e.preventDefault(); $('#guess').click(); }
+  else if ($('#v-result').classList.contains('on') && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); $('#next')?.click(); }
+});
 
+function resultMap() {
+  if (!rmap) { rmap = L.map('rmap', { worldCopyJump: true }); tiles().addTo(rmap); }
+  rLayer?.remove();
+  rLayer = L.layerGroup().addTo(rmap);
+  rmap.invalidateSize();
+  return rLayer;
+}
+function drawPair(layer, g, a, n) {
+  L.polyline([g, a], { dashArray: '6 8', color: '#0d1321', weight: 3 }).addTo(layer);
+  L.marker(g, { icon: pinIcon('#29d398') }).addTo(layer);
+  L.marker(a, { icon: n ? L.divIcon({ className: '', iconSize: [22, 22], html: `<div class="mapnum">${n}</div>` }) : pinIcon('#ff5d73') }).addTo(layer);
+}
 $('#guess').onclick = async () => {
   $('#guess').disabled = true;
   const ll = guessMarker.getLatLng().wrap();
   let r;
   try { r = await api(`game/${game.id}/guess`, { lat: ll.lat, lng: ll.lng }); }
-  catch (e) { alert(e.message); $('#guess').disabled = false; return; }
-  game.total = r.total;
-  show('v-result'); hud();
-  if (!rmap) {
-    rmap = L.map('rmap');
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(rmap);
+  catch (e) { fail(e); $('#guess').disabled = false; return; }
+  game.total = r.total; game.done = r.done;
+  show('v-result');
+  const layer = resultMap(), a = [r.answer.lat, r.answer.lng], g = [r.guess.lat, r.guess.lng];
+  drawPair(layer, g, a);
+  rmap.fitBounds([g, a], { padding: [60, 60], maxZoom: 13 });
+  $('#resultbar').innerHTML = `<div class="mute display" style="font-size:13px">Round ${game.round} of ${game.rounds}</div>
+    <div class="pts">${fmt(r.score)} <span style="font-size:20px">points</span></div>
+    <div class="bar"><i style="width:0"></i></div>
+    <p class="mute" style="margin:0 0 16px">Your guess was <b style="color:var(--fg)">${dist(r.distance_km)}</b> from the correct location. Total: <b style="color:var(--fg)">${fmt(r.total)}</b></p>
+    <button class="btn big" id="next">${r.done ? 'View results' : 'Next round'}</button>`;
+  requestAnimationFrame(() => requestAnimationFrame(() => $('#resultbar .bar i').style.width = Math.min(100, r.score / 10) + '%'));
+};
+$('#resultbar').addEventListener('click', async e => {
+  if (e.target.id === 'next') {
+    e.target.disabled = true;
+    try { game = await api(`game/${game.id}`); game.done ? summary() : round(); } catch (err) { fail(err); e.target.disabled = false; }
   }
-  if (rLayer) rLayer.remove();
-  const a = [r.answer.lat, r.answer.lng], g = [r.guess.lat, r.guess.lng];
-  rLayer = L.layerGroup([L.marker(g).bindTooltip('You'), L.circleMarker(a, { radius: 9, color: '#3ddc97', fillOpacity: 1 }).bindTooltip('Here!'),
-    L.polyline([g, a], { dashArray: '6 6', color: '#fff' })]).addTo(rmap);
-  rmap.invalidateSize();
-  rmap.fitBounds([g, a], { padding: [40, 40], maxZoom: 12 });
-  const km = r.distance_km < 1 ? `${Math.round(r.distance_km * 1000)} m` : `${Math.round(r.distance_km).toLocaleString()} km`;
-  $('#rtext').textContent = `${km} away · +${r.score} points`;
-  $('#rsub').textContent = r.done ? `Game over! Final score: ${r.total}` : `Total so far: ${r.total}`;
-  $('#next').textContent = r.done ? (lobbyCode ? 'Back to lobby' : 'Back to leaderboard') : 'Next round';
-  game.done = r.done;
-};
-
-$('#next').onclick = async () => {
-  if (game.done) return lobbyCode ? lobby(lobbyCode) : home();
-  $('#next').disabled = true;
-  try { game = await api(`game/${game.id}`); round(); } catch (e) { alert(e.message); }
-  $('#next').disabled = false;
-};
-
-// ---------- admin ----------
-async function admin() {
-  show('v-admin');
-  const [{ users }, s] = await Promise.all([api('admin/users'), api('admin/settings')]);
-  $('#s-token').value = s.mapillary_token; $('#s-reg').checked = s.registration_open;
-  const box = (k, on) => `<input type="checkbox" data-f="${k}" ${on ? 'checked' : ''}>`;
-  $('#admin-table tbody').innerHTML = users.map(u => `<tr data-id="${u.id}">
-    <td>${u.id}</td><td><input type="text" data-f="username" value="${esc(u.username)}"></td>
-    <td>${when(u.created)}</td><td>${when(u.last_login)}</td><td>${esc(u.last_ip || '—')}</td><td class="num">${u.sessions}</td>
-    <td class="num">${u.finished || 0}/${u.games}</td><td class="num">${u.best}</td><td class="num">${u.points}</td>
-    <td>${box('is_admin', u.is_admin)}</td><td>${box('banned', u.banned)}</td><td>${box('cheat_reveal', u.cheat_reveal)}</td>
-    <td><input type="number" data-f="cheat_multiplier" value="${u.cheat_multiplier}" min="0" max="100" step="0.1"></td>
-    <td>${box('cheat_aim', u.cheat_aim)}</td><td><input type="number" data-f="cheat_floor" value="${u.cheat_floor}" min="0" max="1000" step="50"></td>
-    <td>${box('cheat_shield', u.cheat_shield)}</td>
-    <td><input type="number" data-f="rank_points" value="${u.rank_points}" min="0" step="1"></td><td>${box('legend', u.legend)}</td>
-    <td><input type="number" data-f="mmr" value="${u.mmr}" min="0" step="1"></td><td class="num">${u.daily_streak}</td>
-    <td class="actions"><button data-act="update">Save</button><button class="ghost" data-act="password">Set password</button>
-      <button class="ghost" data-act="logout">Kick</button><button class="ghost" data-act="reset_stats">Reset stats</button>
-      <button class="bad" data-act="delete">Delete</button></td></tr>`).join('');
+  if (e.target.id === 'again') { try { game = await api('game', {}); round(); } catch (err) { fail(err); } }
+  if (e.target.id === 'tomatch') nav('#/lobby/' + game.lobby);  // nav(), not a link: the hash may already be this page
+  if (e.target.id === 'home') nav('#/play');
+});
+function summary() {
+  show('v-result');
+  const layer = resultMap(), pts = [];
+  game.history.forEach(h => { const g = [h.guess_lat, h.guess_lng], a = [h.lat, h.lng]; drawPair(layer, g, a, h.n); pts.push(g, a); });
+  rmap.fitBounds(pts, { padding: [50, 50], maxZoom: 6 });
+  $('#resultbar').innerHTML = `<div class="mute display" style="font-size:13px">${MODES[game.mode] || 'Practice'} · final score</div>
+    <div class="pts">${fmt(game.total)} <span style="font-size:20px">/ ${fmt(game.rounds * 1000)}</span></div>
+    <div class="bar"><i style="width:0"></i></div>
+    <div class="rounds">${game.history.map(h => `<div><span class="mute">Round ${h.n}</span><b>${fmt(h.score)}</b><span class="mute small">${dist(h.distance)}</span></div>`).join('')}</div>
+    <div class="row" style="justify-content:center">${game.lobby ? '<button class="btn big" id="tomatch">See the match</button>' : '<button class="btn big" id="again">Play again</button>'}
+    <button class="btn ghost" id="home">Home</button></div>`;
+  requestAnimationFrame(() => requestAnimationFrame(() => $('#resultbar .bar i').style.width = Math.min(100, game.total / game.rounds / 10) + '%'));
 }
 
-$('#admin-table').onclick = async e => {
-  const act = e.target.dataset.act; if (!act) return;
-  const tr = e.target.closest('tr'), name = tr.querySelector('[data-f=username]').value, body = { id: +tr.dataset.id, action: act };
-  if (act === 'update') {
-    body.fields = {};
-    tr.querySelectorAll('[data-f]').forEach(i => body.fields[i.dataset.f] = i.type === 'checkbox' ? i.checked : i.value);
+// ---------- admin ----------
+let adminTab = 'accounts';
+async function admin() {
+  show('v-admin');
+  $$('#admintabs button').forEach(b => { b.classList.toggle('on', b.dataset.tab === adminTab); if (b.dataset.tab === 'reports') b.innerHTML = 'Reports' + (me.open_reports ? `<span class="count">${me.open_reports}</span>` : ''); });
+  await ({ accounts: adminAccounts, reports: adminReports, cheats: adminCheats, settings: adminSettings })[adminTab]();
+}
+$('#admintabs').onclick = e => { const t = e.target.closest('[data-tab]'); if (t) { adminTab = t.dataset.tab; admin().catch(fail); } };
+
+async function adminAccounts() {
+  const { users, ranks } = await api('admin/users');
+  const opts = u => [...ranks.map(r => r.name), 'Legend'].map(n => `<option ${n === u.rank ? 'selected' : ''}>${n}</option>`).join('');
+  const box = (k, on, label) => `<label class="small" style="display:inline-flex;gap:4px;align-items:center"><input type="checkbox" data-f="${k}" ${on ? 'checked' : ''}>${label}</label>`;
+  $('#admin').innerHTML = `<div class="panel admin-table"><table><thead><tr>
+      <th>Player</th><th>Rank</th><th>RP</th><th>MMR</th><th>Roles</th><th>Reports</th><th>Activity</th><th class="num">Games</th><th></th></tr></thead><tbody>
+    ${users.map(u => `<tr data-id="${u.id}" data-name="${esc(u.username)}">
+      <td><input type="text" data-f="username" value="${esc(u.username)}" aria-label="Username"></td>
+      <td><select data-f="rank" aria-label="Rank">${opts(u)}</select></td>
+      <td><input type="number" data-f="rank_points" value="${u.rank_points}" min="0" step="1" aria-label="RP"></td>
+      <td><input type="number" data-f="mmr" value="${u.mmr}" min="0" step="1" aria-label="MMR"></td>
+      <td>${box('is_admin', u.is_admin, 'Admin')} ${box('banned', u.banned, 'Banned')}</td>
+      <td>${u.open_reports ? `<span class="pill loss">${u.open_reports} open</span>` : '<span class="mute">—</span>'}</td>
+      <td class="small"><div>Joined ${u.created ? new Date(u.created * 1000).toLocaleDateString() : '—'}</div><div class="mute">Seen ${u.last_login ? ago(u.last_login) : 'never'} · ${esc(u.last_ip || 'no IP')} · ${u.sessions} session${u.sessions === 1 ? '' : 's'} · ${u.daily_streak}-day streak</div></td>
+      <td class="num">${u.finished || 0}/${u.games}<div class="mute small">best ${fmt(u.best)}</div></td>
+      <td><div class="acts"><button class="btn sm" data-act="update">Save</button>
+        <select data-more aria-label="More actions for ${esc(u.username)}"><option value="">More…</option><option value="password">Set password</option>
+          <option value="logout">Kick (log out)</option><option value="reset_stats">Reset stats</option><option value="delete">Delete account</option></select></div></td></tr>`).join('')}</tbody></table></div>`;
+  // picking a rank snaps RP into that rank's range
+  $('#admin').onchange = e => {
+    if ('more' in e.target.dataset) { const act = e.target.value; e.target.value = ''; return act && doAct(e.target.closest('tr'), act); }
+    if (e.target.dataset.f !== 'rank') return;
+    const tr = e.target.closest('tr'), rp = $('[data-f=rank_points]', tr), i = ranks.findIndex(r => r.name === e.target.value);
+    if (i >= 0 && !(+rp.value >= ranks[i].rp && (i === ranks.length - 1 || +rp.value < ranks[i + 1].rp))) rp.value = ranks[i].rp;
+  };
+  $('#admin').onclick = e => e.target.dataset.act && doAct(e.target.closest('tr'), e.target.dataset.act);
+  async function doAct(tr, act) {
+    const name = tr.dataset.name, body = { id: +tr.dataset.id, action: act };
+    if (act === 'update') {
+      const f = body.fields = {};
+      $$('[data-f]', tr).forEach(i => f[i.dataset.f] = i.type === 'checkbox' ? i.checked : i.value);
+      f.legend = f.rank === 'Legend'; delete f.rank;
+    }
+    if (act === 'password') {
+      return modal(`New password for ${name}`, `<label>Password<input type="text" id="np" minlength="6"></label><div class="err" id="np-err"></div><button class="btn" id="np-save">Set password</button>`, (m, close) => {
+        $('#np-save', m).onclick = async () => { try { await api('admin/user', { ...body, password: $('#np', m).value }); close(); toast(`Password set. ${name} was logged out.`); } catch (err) { $('#np-err', m).textContent = err.message; } };
+      });
+    }
+    if (act === 'delete' && !await confirmBox(`Delete ${name}?`, 'Their account, games and lobbies are removed for good.', 'Delete')) return;
+    if (act === 'reset_stats' && !await confirmBox(`Reset ${name}'s stats?`, 'All of their games are deleted. Rank and MMR stay as they are.', 'Reset')) return;
+    try { await api('admin/user', body); toast(act === 'update' ? 'Saved' : 'Done'); await refreshMe(); adminAccounts(); } catch (err) { fail(err); }
   }
-  if (act === 'password' && !(body.password = prompt(`New password for ${name}:`))) return;
-  if ((act === 'delete' || act === 'reset_stats') && !confirm(`${act === 'delete' ? 'Delete account' : 'Wipe all games of'} ${name}?`)) return;
-  $('#adminmsg').textContent = '';
-  try { await api('admin/user', body); me = await api('me'); nav(); admin(); } catch (err) { $('#adminmsg').textContent = err.message; }
-};
+}
 
-$('#settings').onsubmit = async e => {
-  e.preventDefault();
-  try { await api('admin/settings', { mapillary_token: $('#s-token').value, registration_open: $('#s-reg').checked }); $('#adminmsg').textContent = 'Settings saved.'; }
-  catch (err) { $('#adminmsg').textContent = err.message; }
-};
+async function adminReports() {
+  const { reports } = await api('admin/reports');
+  $('#admin').innerHTML = `<div class="grid">${reports.map(r => `<div class="report ${r.status === 'open' ? '' : 'closed'}" data-id="${r.id}">
+      <div class="row" style="justify-content:space-between"><div class="row" style="gap:8px">${avatar(r.target)}<div>${plink(r.target)} <span class="pill ${r.status === 'open' ? 'loss' : 'draw'}">${esc(r.reason_label)}</span>
+        ${r.target_banned ? '<span class="pill draw">banned</span>' : ''}<div class="mute small">Reported by ${r.reporter ? plink(r.reporter) : 'a deleted user'} · ${ago(r.created)}${r.lobby_code ? ` · match <a href="#/lobby/${esc(r.lobby_code)}">${esc(r.lobby_code)}</a>` : ''} · ${r.target_reports} report${r.target_reports === 1 ? '' : 's'} total</div></div></div>
+        ${r.status === 'open' ? `<div class="acts row" style="gap:6px"><button class="btn sm danger" data-act="ban">Ban</button><button class="btn sm" data-act="resolve">Resolve</button><button class="btn sm ghost" data-act="dismiss">Dismiss</button></div>`
+          : `<span class="mute small">${r.status} by ${esc(r.resolved_by)} · ${ago(r.resolved_at)}</span>`}</div>
+      ${r.details ? `<blockquote>${esc(r.details)}</blockquote>` : ''}</div>`).join('') || '<div class="panel empty">No reports. Everyone\'s behaving.</div>'}</div>`;
+  $('#admin').onchange = null;
+  $('#admin').onclick = async e => {
+    const act = e.target.dataset.act; if (!act) return;
+    const card = e.target.closest('[data-id]');
+    if (act === 'ban' && !await confirmBox('Ban this player?', 'They\'re logged out and can\'t sign in. All open reports about them are closed.', 'Ban')) return;
+    try { await api('admin/report', { id: +card.dataset.id, action: act }); await refreshMe(); admin(); } catch (err) { fail(err); }
+  };
+}
 
+async function adminCheats() {
+  const c = await api('admin/cheats');
+  const sw = (k, title, desc) => `<div class="switch"><div><b>${title}</b><small>${desc}</small></div><input type="checkbox" class="toggle" data-k="${k}" ${c[k] ? 'checked' : ''} aria-label="${title}"></div>`;
+  const num = (k, title, desc, attrs) => `<div class="switch"><div><b>${title}</b><small>${desc}</small></div><input type="number" data-k="${k}" value="${c[k]}" ${attrs} style="width:100px" aria-label="${title}"></div>`;
+  $('#admin').innerHTML = `<div class="panel" style="max-width:640px">
+    <p class="mute" style="margin-top:0">Admin-only. These apply to your account only, in every mode, and nobody else can see them. Demoting an admin switches their cheats off.</p>
+    ${sw('cheat_reveal', 'Peek', 'An eye button in-game drops a small dot on the real location.')}
+    ${sw('cheat_aim', 'Aimbot', 'A target button places your pin 2–40 km from the answer, so it looks legit. Then press Guess.')}
+    ${sw('cheat_shield', 'Rank shield', 'You never lose RP or MMR. Wins still count.')}
+    ${num('cheat_multiplier', 'Score multiplier', 'Every round\'s score is multiplied by this. 1 = off.', 'min="0" max="100" step="0.05"')}
+    ${num('cheat_floor', 'Score floor', 'Every round is worth at least this many points (0–1000). 0 = off.', 'min="0" max="1000" step="50"')}
+  </div>`;
+  $('#admin').onclick = null;
+  $('#admin').onchange = async e => {
+    const k = e.target.dataset.k; if (!k) return;
+    try { await api('admin/cheats', { [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value }); await refreshMe(); toast('Cheat updated'); }
+    catch (err) { fail(err); adminCheats(); }
+  };
+}
+
+async function adminSettings() {
+  const s = await api('admin/settings');
+  $('#admin').innerHTML = `<div class="panel" style="max-width:640px"><form id="settings" class="grid">
+    <label class="grid" style="gap:6px"><b>Mapillary client token</b><span class="mute small">Free at mapillary.com/dashboard/developers. Register an app and copy its client token.</span><input id="s-token" value="${esc(s.mapillary_token)}"></label>
+    <div class="switch"><div><b>Open sign-ups</b><small>Let anyone create an account. Turn off to freeze the player list.</small></div><input type="checkbox" class="toggle" id="s-reg" ${s.registration_open ? 'checked' : ''} aria-label="Open sign-ups"></div>
+    <div><button class="btn">Save settings</button></div></form></div>`;
+  $('#admin').onclick = $('#admin').onchange = null;
+  $('#settings').onsubmit = async e => {
+    e.preventDefault();
+    try { await api('admin/settings', { mapillary_token: $('#s-token').value, registration_open: $('#s-reg').checked }); toast('Settings saved'); } catch (err) { fail(err); }
+  };
+}
+
+paintIcons();
 start();
 </script>
 </body>

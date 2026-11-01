@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Better Guesser: a tiny self-hosted geography guessing game. Python stdlib only."""
-import datetime, hashlib, hmac, json, math, os, random, re, secrets, sqlite3, sys, time, traceback
+import datetime, hashlib, hmac, json, math, os, random, re, secrets, sqlite3, sys, threading, time, traceback
 import urllib.error, urllib.parse, urllib.request
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,7 +14,13 @@ SESSION_SECS = 30 * 86400
 USERNAME_RE = r"[A-Za-z0-9_.-]{3,20}"
 RANKS = [(0, "Bronze"), (100, "Silver"), (200, "Gold"), (300, "Platinum"), (400, "Diamond"), (500, "Master")]
 LEGEND_RP = RANKS[-1][0]  # reaching the top rank unlocks Legend Division
-WIN_RP, LOSS_RP, START_MMR, ELO_K = 25, 20, 1500, 32
+START_MMR = 1500
+RP_K, RP_SCALE, RP_CAP = 40, 200, 60  # ranked: Elo-style on RP, so beating higher ranks pays more
+ELO_K, ELO_SCALE = 32, 400  # legend MMR
+BLOWOUT = 2500  # a points margin this big doubles the rating swing
+MATCH_TTL = 86400  # matchmade games older than this get resolved: unfilled ones close, no-shows forfeit
+LOGIN_WINDOW, LOGIN_MAX_FAILS = 900, 10
+REPORT_REASONS = {"cheating": "Cheating", "name": "Offensive username", "abuse": "Harassment or abuse", "other": "Other"}
 SEATS = {"ranked": 2, "legend": 2, "1v1": 2, "2v2": 4}  # players per match; private lobbies are full by the time they start
 DAILY_CYCLE = 7  # daily reward grows for 7 straight days, then the cycle restarts
 
@@ -51,6 +57,9 @@ CREATE TABLE IF NOT EXISTS lobbies(id INTEGER PRIMARY KEY, code TEXT UNIQUE NOT 
   host_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, started INTEGER NOT NULL DEFAULT 0, created REAL);
 CREATE TABLE IF NOT EXISTS lobby_members(lobby_id INTEGER NOT NULL REFERENCES lobbies(id) ON DELETE CASCADE,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, team TEXT, PRIMARY KEY(lobby_id, user_id));
+CREATE TABLE IF NOT EXISTS reports(id INTEGER PRIMARY KEY, reporter_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  target_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, reason TEXT NOT NULL, details TEXT, lobby_code TEXT,
+  created REAL, status TEXT NOT NULL DEFAULT 'open', resolved_by TEXT, resolved_at REAL);
 CREATE TABLE IF NOT EXISTS lobby_rounds(lobby_id INTEGER NOT NULL REFERENCES lobbies(id) ON DELETE CASCADE, n INTEGER NOT NULL,
   image_id TEXT, lat REAL, lng REAL, PRIMARY KEY(lobby_id, n));
 """
@@ -67,6 +76,10 @@ MIGRATIONS = [
     ("users", "daily_last", "TEXT"),
     ("users", "daily_streak", "INTEGER NOT NULL DEFAULT 0"),
     ("lobbies", "matchmade", "INTEGER NOT NULL DEFAULT 0", "UPDATE lobbies SET matchmade=1 WHERE mode IN ('ranked','legend')"),
+    ("lobby_members", "result", "REAL"),  # v0.5: 1 win, 0.5 draw, 0 loss
+    # v0.5: cheats became admin-only; clear any that were handed to regular players
+    ("users", "cheats_admin_only", "INTEGER NOT NULL DEFAULT 1",
+     "UPDATE users SET cheat_reveal=0, cheat_aim=0, cheat_shield=0, cheat_floor=0, cheat_multiplier=1 WHERE is_admin=0"),
 ]
 
 
@@ -128,6 +141,14 @@ def bounded(v, lo, hi, what):
 
 def rank_name(rp):
     return [name for floor, name in RANKS if rp >= floor][-1]
+
+
+CHEAT_OFF = {"cheat_reveal": 0, "cheat_aim": 0, "cheat_shield": 0, "cheat_floor": 0, "cheat_multiplier": 1}
+
+
+def cheat(u, key):
+    """Cheats are an admin perk: for anyone else they're always off, whatever the database says."""
+    return u[key] if u["is_admin"] else CHEAT_OFF[key]
 
 
 def valid_password(pw):
@@ -194,13 +215,37 @@ def api_register(h, b):
     return new_session(h, uid)
 
 
+_fails, _fails_lock = {}, threading.Lock()  # shortcut: in-memory, resets on restart; fine for a single process
+
+
+def login_throttle(ip, failed=False):
+    now = time.time()
+    with _fails_lock:
+        recent = [t for t in _fails.get(ip, []) if t > now - LOGIN_WINDOW] + ([now] if failed else [])
+        _fails[ip] = recent
+    if not failed and len(recent) >= LOGIN_MAX_FAILS:
+        raise Err(429, "Too many failed logins. Try again in 15 minutes.")
+
+
 def api_login(h, b):
+    login_throttle(h.client_ip())
     u = db().execute("SELECT * FROM users WHERE username=?", (str(b.get("username")),)).fetchone()
     if not u or not check_pw(str(b.get("password")), u["pw"]):
+        login_throttle(h.client_ip(), failed=True)
         raise Err(401, "Wrong username or password")
     if u["banned"]:
         raise Err(403, "This account is banned")
     return new_session(h, u["id"])
+
+
+def api_password(h, b):
+    u = h.user()
+    if not check_pw(str(b.get("old")), u["pw"]):
+        raise Err(403, "Current password is wrong")
+    with db() as c:
+        c.execute("UPDATE users SET pw=? WHERE id=?", (hash_pw(valid_password(b.get("new"))), u["id"]))
+        c.execute("DELETE FROM sessions WHERE user_id=? AND token!=?", (u["id"], h.token()))  # log out other devices
+    return {"ok": True}
 
 
 def api_logout(h, b):
@@ -215,7 +260,8 @@ def api_me(h, b):
     today = utc_today()
     claimed = u["daily_last"] == today.isoformat()
     return {"username": u["username"], "is_admin": bool(u["is_admin"]),
-            "cheat_reveal": bool(u["cheat_reveal"]), "cheat_aim": bool(u["cheat_aim"]),
+            "cheat_reveal": bool(cheat(u, "cheat_reveal")), "cheat_aim": bool(cheat(u, "cheat_aim")),
+            "open_reports": db().execute("SELECT COUNT(*) FROM reports WHERE status='open'").fetchone()[0] if u["is_admin"] else 0,
             "daily_available": not claimed,
             "daily_next": daily_reward(u["daily_streak"] + 1 if claimed else next_streak(u, today), u["legend"]),
             "daily_streak": u["daily_streak"] if u["daily_last"] in (today.isoformat(), str(today - datetime.timedelta(days=1))) else 0,
@@ -228,8 +274,10 @@ def game_state(u, gid):
     g = c.execute("SELECT * FROM games WHERE id=? AND user_id=?", (gid, u["id"])).fetchone()
     if not g:
         raise Err(404, "No such game")
-    played = c.execute("SELECT n, score, distance FROM rounds WHERE game_id=? AND score IS NOT NULL ORDER BY n", (gid,)).fetchall()
-    state = {"id": g["id"], "rounds": ROUNDS, "total": g["total"], "done": bool(g["done"]),
+    played = c.execute("""SELECT n, score, distance, lat, lng, guess_lat, guess_lng FROM rounds
+        WHERE game_id=? AND score IS NOT NULL ORDER BY n""", (gid,)).fetchall()  # only finished rounds, so no answers leak
+    lb = c.execute("SELECT code, mode FROM lobbies WHERE id=?", (g["lobby_id"],)).fetchone() if g["lobby_id"] else None
+    state = {"id": g["id"], "rounds": ROUNDS, "lobby": lb["code"] if lb else None, "mode": lb["mode"] if lb else "solo", "total": g["total"], "done": bool(g["done"]),
              "history": [dict(r) for r in played], "token": setting("mapillary_token")}
     if g["done"]:
         return state
@@ -282,7 +330,7 @@ def api_guess(h, b, gid):
     lng = (lng + 180) % 360 - 180  # the map wraps around the world
     r = open_round(u, gid)
     km = haversine_km(lat, lng, r["lat"], r["lng"])
-    s = round(max(score_for(km), u["cheat_floor"]) * u["cheat_multiplier"])  # cheats apply in every mode
+    s = round(max(score_for(km), cheat(u, "cheat_floor")) * cheat(u, "cheat_multiplier"))  # cheats apply in every mode
     done = r["n"] >= ROUNDS
     with db() as c:
         if c.execute("UPDATE rounds SET guess_lat=?, guess_lng=?, distance=?, score=? WHERE game_id=? AND n=? AND score IS NULL",
@@ -290,35 +338,69 @@ def api_guess(h, b, gid):
             raise Err(409, "Already guessed")
         c.execute("UPDATE games SET total=total+?, done=? WHERE id=?", (s, int(done), r["game_id"]))
         total = c.execute("SELECT total FROM games WHERE id=?", (r["game_id"],)).fetchone()["total"]
-        if done:
-            settle(c, r["game_id"])
+        lobby_id = c.execute("SELECT lobby_id FROM games WHERE id=?", (r["game_id"],)).fetchone()["lobby_id"]
+        if done and lobby_id:
+            settle(c, lobby_id)
     return {"distance_km": km, "score": s, "total": total, "done": done,
             "answer": {"lat": r["lat"], "lng": r["lng"]}, "guess": {"lat": lat, "lng": lng}}
 
 
-def settle(c, game_id):
-    """Award RP (ranked) or MMR (legend) once both players of a 1v1 match have finished. Runs inside the guess transaction."""
-    lb = c.execute("SELECT l.* FROM lobbies l JOIN games g ON g.lobby_id=l.id WHERE g.id=?", (game_id,)).fetchone()
-    if not lb or lb["mode"] not in ("ranked", "legend"):
+def rating_delta(mode, res, me, opp, margin, shield):
+    """Dynamic RP/MMR change. Elo-style expected result from the rating gap, scaled up by the points margin.
+    res: 1 win / 0.5 draw / 0 loss. me/opp: users rows. margin: 0..1 (1 = blowout)."""
+    legend = mode == "legend"
+    mine, theirs = (me["mmr"], opp["mmr"]) if legend else (me["rank_points"], opp["rank_points"])
+    expected = 1 / (1 + 10 ** ((theirs - mine) / (ELO_SCALE if legend else RP_SCALE)))
+    delta = (ELO_K if legend else RP_K) * (1 + margin) * (res - expected)
+    if not legend:
+        delta = round(max(-RP_CAP, min(RP_CAP, delta)))
+        delta = max(delta, 5) if res == 1 else min(delta, -5) if res == 0 else delta  # a result always moves you a bit
+        delta = max(delta, -me["rank_points"])  # RP never goes below 0
+    if shield:
+        delta = max(delta, 0)
+    return round(delta, 1)
+
+
+def settle(c, lobby_id, force=False):
+    """Record results once every seat has finished (or, with force, resolve an expired match: no-shows forfeit).
+    Ranked/legend also move RP/MMR. Runs inside the caller's transaction; settles each lobby once."""
+    lb = c.execute("SELECT * FROM lobbies WHERE id=?", (lobby_id,)).fetchone()
+    seats = SEATS.get(lb["mode"]) if lb else None
+    if not seats or lb["settled"]:
         return
-    p = c.execute("""SELECT u.id, u.rank_points, u.mmr, u.cheat_shield, COALESCE(g.total,0) total, COALESCE(g.done,0) done
+    p = c.execute("""SELECT u.*, m.team, COALESCE(g.total,0) total, COALESCE(g.done,0) done
         FROM lobby_members m JOIN users u ON u.id=m.user_id LEFT JOIN games g ON g.lobby_id=m.lobby_id AND g.user_id=m.user_id
-        WHERE m.lobby_id=? ORDER BY u.id""", (lb["id"],)).fetchall()
-    if len(p) != 2 or not all(x["done"] for x in p):
+        WHERE m.lobby_id=? ORDER BY u.id""", (lobby_id,)).fetchall()
+    complete = len(p) == seats and all(x["done"] for x in p)
+    if not complete and not force:
         return
-    if c.execute("UPDATE lobbies SET settled=1 WHERE id=? AND settled=0", (lb["id"],)).rowcount != 1:
-        return  # already settled
-    a, b = p
-    result = 1 if a["total"] > b["total"] else 0 if a["total"] < b["total"] else 0.5  # a's result
-    for me, opp, res in ((a, b, result), (b, a, 1 - result)):
-        if lb["mode"] == "legend":
-            delta = ELO_K * (res - 1 / (1 + 10 ** ((opp["mmr"] - me["mmr"]) / 400)))
-            delta = max(delta, 0) if me["cheat_shield"] else delta
-            c.execute("UPDATE users SET mmr=mmr+? WHERE id=?", (delta, me["id"]))
-        else:
-            delta = WIN_RP if res == 1 else -min(LOSS_RP, me["rank_points"]) if res == 0 and not me["cheat_shield"] else 0
-            c.execute("UPDATE users SET rank_points=rank_points+? WHERE id=?", (delta, me["id"]))
-        c.execute("UPDATE lobby_members SET delta=? WHERE lobby_id=? AND user_id=?", (round(delta, 1), lb["id"], me["id"]))
+    if c.execute("UPDATE lobbies SET settled=1 WHERE id=? AND settled=0", (lobby_id,)).rowcount != 1:
+        return
+    if len(p) < seats:
+        return  # never filled up: closed without a result
+    side = (lambda x: x["team"]) if lb["mode"] == "2v2" else (lambda x: x["id"])
+    sides = {}
+    for x in p:
+        sides.setdefault(side(x), []).append(x)
+    # a side with a no-show forfeits (-1); otherwise its score is the sum of its players
+    score = {k: sum(x["total"] for x in v) if all(x["done"] for x in v) else -1 for k, v in sides.items()}
+    for x in p:
+        mine = score[side(x)]
+        theirs = next(v for k, v in score.items() if k != side(x))
+        res = 1 if mine > theirs else 0 if mine < theirs else 0.5
+        delta = None
+        if lb["mode"] in ("ranked", "legend"):
+            opp = next(y for y in p if y["id"] != x["id"])
+            margin = min(abs(x["total"] - opp["total"]) / BLOWOUT, 1)
+            delta = rating_delta(lb["mode"], res, x, opp, margin, cheat(x, "cheat_shield"))
+            col = "mmr" if lb["mode"] == "legend" else "rank_points"
+            c.execute(f"UPDATE users SET {col}={col}+? WHERE id=?", (delta, x["id"]))
+        c.execute("UPDATE lobby_members SET result=?, delta=? WHERE lobby_id=? AND user_id=?", (res, delta, lobby_id, x["id"]))
+
+
+def expire_stale(c):
+    for (lid,) in c.execute("SELECT id FROM lobbies WHERE matchmade=1 AND settled=0 AND created<?", (time.time() - MATCH_TTL,)).fetchall():
+        settle(c, lid, force=True)
 
 
 def api_queue(h, b):
@@ -336,14 +418,14 @@ def api_queue(h, b):
     c = db()
     with c:
         c.execute("BEGIN IMMEDIATE")  # one matchmaker at a time, so two players can't grab the same last seat
+        expire_stale(c)
         mine = c.execute("""SELECT l.code FROM lobbies l JOIN lobby_members m ON m.lobby_id=l.id AND m.user_id=?
             LEFT JOIN games g ON g.lobby_id=l.id AND g.user_id=m.user_id
-            WHERE l.mode=? AND l.matchmade=1 AND COALESCE(g.done,0)=0 ORDER BY l.id LIMIT 1""", (u["id"], mode)).fetchone()
+            WHERE l.mode=? AND l.matchmade=1 AND l.settled=0 AND COALESCE(g.done,0)=0 ORDER BY l.id LIMIT 1""", (u["id"], mode)).fetchone()
         if mine:
             return {"code": mine["code"]}  # finish your current match first
-        # shortcut: a player who never finishes leaves the match unsettled forever; add a timeout if that bites
         open_ = c.execute(f"""SELECT l.id, l.code FROM lobbies l JOIN users hu ON hu.id=l.host_id
-            WHERE l.mode=? AND l.matchmade=1 AND hu.banned=0
+            WHERE l.mode=? AND l.matchmade=1 AND l.settled=0 AND hu.banned=0
               AND NOT EXISTS(SELECT 1 FROM lobby_members x WHERE x.lobby_id=l.id AND x.user_id=?)
               AND (SELECT COUNT(*) FROM lobby_members x WHERE x.lobby_id=l.id) < ?
             ORDER BY ABS({skill}-?), l.id LIMIT 1""", (mode, u["id"], SEATS[mode], my_skill)).fetchone()
@@ -403,7 +485,7 @@ def api_legends(h, b):
 
 def api_peek(h, b, gid):
     u = h.user()
-    if not (u["cheat_reveal"] or u["cheat_aim"]):
+    if not (cheat(u, "cheat_reveal") or cheat(u, "cheat_aim")):
         raise Err(403, "Nice try")
     r = open_round(u, gid)
     return {"lat": r["lat"], "lng": r["lng"]}
@@ -417,6 +499,104 @@ def api_leaderboard(h, b):
     return {"rows": [dict(r) for r in rows]}
 
 
+def api_ranked_board(h, b):
+    """Public: top ranked players below Legend."""
+    rows = db().execute("""SELECT username, rank_points FROM users WHERE legend=0 AND banned=0 AND rank_points>0
+        ORDER BY rank_points DESC, username LIMIT 100""").fetchall()
+    return {"rows": [{"username": r["username"], "rank_points": r["rank_points"], "rank": rank_name(r["rank_points"])} for r in rows]}
+
+
+def record(rows):
+    return {"w": sum(r["result"] == 1 for r in rows), "l": sum(r["result"] == 0 for r in rows), "d": sum(r["result"] == 0.5 for r in rows)}
+
+
+def api_profile(h, b, name):
+    h.user()
+    c = db()
+    u = c.execute("SELECT * FROM users WHERE username=?", (name,)).fetchone()
+    if not u:
+        raise Err(404, "No such player")
+    g = c.execute("SELECT COUNT(*) n, MAX(total) best, AVG(total) avg FROM games WHERE user_id=? AND done=1", (u["id"],)).fetchone()
+    rnd = c.execute("""SELECT AVG(r.distance) dist, SUM(r.score >= 990) perfect FROM rounds r JOIN games g ON g.id=r.game_id
+        WHERE g.user_id=? AND r.score IS NOT NULL""", (u["id"],)).fetchone()
+    matches = c.execute("""SELECT l.code, l.mode, l.created, m.result, m.delta, COALESCE(g.total,0) total FROM lobby_members m
+        JOIN lobbies l ON l.id=m.lobby_id LEFT JOIN games g ON g.lobby_id=l.id AND g.user_id=m.user_id
+        WHERE m.user_id=? AND m.result IS NOT NULL ORDER BY l.id DESC""", (u["id"],)).fetchall()
+    ranked = [m for m in matches if m["mode"] in ("ranked", "legend")]
+    return {"username": u["username"], "joined": u["created"], "banned": bool(u["banned"]),
+            "rank": "Legend" if u["legend"] else rank_name(u["rank_points"]), "rank_points": u["rank_points"],
+            "legend": bool(u["legend"]), "mmr": round(u["mmr"]),
+            "games": g["n"], "best": g["best"] or 0, "avg": round(g["avg"] or 0),
+            "avg_km": round(rnd["dist"] or 0), "perfect_rounds": rnd["perfect"] or 0,
+            "ranked_record": record(ranked), "casual_record": record([m for m in matches if m not in ranked]),
+            "recent": [dict(m) for m in matches[:15]]}
+
+
+def api_report(h, b):
+    u = h.user()
+    t = db().execute("SELECT id, username FROM users WHERE username=?", (str(b.get("username")),)).fetchone()
+    if not t:
+        raise Err(404, "No such player")
+    if t["id"] == u["id"]:
+        raise Err(400, "You can't report yourself")
+    if b.get("reason") not in REPORT_REASONS:
+        raise Err(400, "Pick a reason")
+    details = str(b.get("details") or "").strip()[:500]
+    c = db()
+    if c.execute("SELECT 1 FROM reports WHERE reporter_id=? AND target_id=? AND status='open'", (u["id"], t["id"])).fetchone():
+        raise Err(409, f"You already have an open report on {t['username']}")
+    if c.execute("SELECT COUNT(*) FROM reports WHERE reporter_id=? AND created>?", (u["id"], time.time() - 86400)).fetchone()[0] >= 10:
+        raise Err(429, "You've sent a lot of reports today. Try again tomorrow.")
+    with c:
+        c.execute("INSERT INTO reports(reporter_id,target_id,reason,details,lobby_code,created) VALUES(?,?,?,?,?,?)",
+                  (u["id"], t["id"], b["reason"], details, str(b.get("lobby") or "")[:6] or None, time.time()))
+    return {"ok": True}
+
+
+def api_admin_reports(h, b):
+    h.user(admin=True)
+    rows = db().execute("""SELECT r.*, rep.username reporter, t.username target, t.banned target_banned,
+        (SELECT COUNT(*) FROM reports x WHERE x.target_id=r.target_id) target_reports
+        FROM reports r JOIN users t ON t.id=r.target_id LEFT JOIN users rep ON rep.id=r.reporter_id
+        ORDER BY r.status='open' DESC, r.id DESC LIMIT 200""").fetchall()
+    return {"reports": [dict(r) | {"reason_label": REPORT_REASONS.get(r["reason"], r["reason"])} for r in rows]}
+
+
+def api_admin_report(h, b):
+    me = h.user(admin=True)
+    action = b.get("action")
+    if action not in ("resolve", "dismiss", "ban"):
+        raise Err(400, "Unknown action")
+    r = db().execute("SELECT * FROM reports WHERE id=?", (int(b["id"]),)).fetchone()
+    if not r:
+        raise Err(404, "No such report")
+    with db() as c:
+        if action == "ban":
+            if r["target_id"] == me["id"]:
+                raise Err(400, "You can't ban yourself")
+            c.execute("UPDATE users SET banned=1 WHERE id=?", (r["target_id"],))
+            c.execute("DELETE FROM sessions WHERE user_id=?", (r["target_id"],))
+            # banning settles every open report about that player
+            c.execute("""UPDATE reports SET status='resolved', resolved_by=?, resolved_at=? WHERE target_id=? AND status='open'""",
+                      (me["username"], time.time(), r["target_id"]))
+        else:
+            c.execute("UPDATE reports SET status=?, resolved_by=?, resolved_at=? WHERE id=?",
+                      ("resolved" if action == "resolve" else "dismissed", me["username"], time.time(), r["id"]))
+    return {"ok": True}
+
+
+def api_admin_cheats(h, b):
+    """An admin's own cheat menu. Nobody can switch cheats on for someone else."""
+    u = h.user(admin=True)
+    if h.command == "POST":
+        sets = {k: conv(b[k]) for k, conv in CHEAT_FIELDS.items() if k in b}
+        if sets:
+            with db() as c:
+                c.execute(f"UPDATE users SET {', '.join(k + '=?' for k in sets)} WHERE id=?", (*sets.values(), u["id"]))
+            u = h.user(admin=True)
+    return {k: u[k] for k in CHEAT_FIELDS}
+
+
 def get_lobby(code):
     lb = db().execute("SELECT * FROM lobbies WHERE code=?", (str(code).strip().upper(),)).fetchone()
     if not lb:
@@ -425,8 +605,11 @@ def get_lobby(code):
 
 
 def lobby_state(u, code):
-    lb, c = get_lobby(code), db()
-    rows = c.execute("""SELECT u.id, u.username, m.team, m.delta, g.id game_id, COALESCE(g.total,0) total, COALESCE(g.done,0) done,
+    c = db()
+    with c:
+        expire_stale(c)
+    lb = get_lobby(code)
+    rows = c.execute("""SELECT u.id, u.username, m.team, m.delta, m.result, g.id game_id, COALESCE(g.total,0) total, COALESCE(g.done,0) done,
         (SELECT COUNT(*) FROM rounds r WHERE r.game_id=g.id AND r.score IS NOT NULL) played
         FROM lobby_members m JOIN users u ON u.id=m.user_id
         LEFT JOIN games g ON g.lobby_id=m.lobby_id AND g.user_id=m.user_id
@@ -442,8 +625,9 @@ def lobby_state(u, code):
             "rounds": ROUNDS, "teams": teams, "my_team": me["team"], "my_done": bool(me["done"]),
             "finished": bool(lb["started"]) and all(r["done"] for r in rows) and len(rows) == SEATS.get(lb["mode"], len(rows)),
             "seats": SEATS.get(lb["mode"]),
-            "matchmade": bool(lb["matchmade"]),
-            "members": [{k: r[k] for k in ("username", "team", "total", "played", "done", "delta")} | {"host": r["id"] == lb["host_id"]} for r in rows]}
+            "matchmade": bool(lb["matchmade"]), "settled": bool(lb["settled"]), "my_result": me["result"],
+            "expired": bool(lb["settled"]) and (len(rows) < SEATS.get(lb["mode"], 0) or not all(r["done"] for r in rows)),
+            "members": [{k: r[k] for k in ("username", "team", "total", "played", "done", "delta", "result")} | {"host": r["id"] == lb["host_id"]} for r in rows]}
 
 
 def api_lobby_create(h, b):
@@ -528,7 +712,9 @@ def api_lobby_play(h, b, code):
 
 def api_my_lobbies(h, b):
     u = h.user()
-    rows = db().execute("""SELECT l.code, l.mode, l.started, l.settled, l.matchmade, m.delta, hu.username host,
+    with db() as c:
+        expire_stale(c)
+    rows = db().execute("""SELECT l.code, l.mode, l.started, l.settled, l.matchmade, l.created, m.delta, m.result, hu.username host,
         (SELECT COUNT(*) FROM lobby_members x WHERE x.lobby_id=l.id) players
         FROM lobby_members m JOIN lobbies l ON l.id=m.lobby_id JOIN users hu ON hu.id=l.host_id
         WHERE m.user_id=? ORDER BY l.id DESC LIMIT 20""", (u["id"],)).fetchall()
@@ -537,13 +723,15 @@ def api_my_lobbies(h, b):
 
 def api_admin_users(h, b):
     h.user(admin=True)
-    rows = db().execute("""SELECT u.id, u.username, u.is_admin, u.banned, u.cheat_reveal, u.cheat_multiplier,
-        u.rank_points, u.legend, ROUND(u.mmr) mmr, u.cheat_aim, u.cheat_floor, u.cheat_shield, u.daily_streak,
+    rows = db().execute("""SELECT u.id, u.username, u.is_admin, u.banned,
+        u.rank_points, u.legend, ROUND(u.mmr) mmr, u.daily_streak,
+        (SELECT COUNT(*) FROM reports r WHERE r.target_id=u.id AND r.status='open') open_reports,
         u.created, u.last_login, u.last_ip, COUNT(g.id) games, SUM(g.done) finished,
         COALESCE(MAX(CASE WHEN g.done THEN g.total END),0) best, COALESCE(SUM(g.total),0) points,
         (SELECT COUNT(*) FROM sessions s WHERE s.user_id=u.id AND s.expires>?) sessions
         FROM users u LEFT JOIN games g ON g.user_id=u.id GROUP BY u.id ORDER BY u.id""", (time.time(),)).fetchall()
-    return {"users": [dict(r) for r in rows]}
+    return {"users": [dict(r) | {"rank": "Legend" if r["legend"] else rank_name(r["rank_points"])} for r in rows],
+            "ranks": [{"name": n, "rp": rp} for rp, n in RANKS]}
 
 
 def api_admin_user(h, b):
@@ -585,11 +773,13 @@ def api_admin_user(h, b):
 
 flag = lambda v: int(bool(v))  # noqa: E731
 ADMIN_FIELDS = {  # column -> validator; keys are fixed, so safe to put in SQL
-    "username": valid_username, "is_admin": flag, "banned": flag, "cheat_reveal": flag, "legend": flag,
-    "cheat_multiplier": lambda v: bounded(float(v), 0, 100, "Multiplier"),
+    "username": valid_username, "is_admin": flag, "banned": flag, "legend": flag,
     "rank_points": lambda v: bounded(int(v), 0, 100_000, "RP"),
     "mmr": lambda v: bounded(float(v), 0, 10_000, "MMR"),
-    "cheat_aim": flag, "cheat_shield": flag,
+}
+CHEAT_FIELDS = {
+    "cheat_reveal": flag, "cheat_aim": flag, "cheat_shield": flag,
+    "cheat_multiplier": lambda v: bounded(float(v), 0, 100, "Multiplier"),
     "cheat_floor": lambda v: bounded(int(v), 0, 1000, "Score floor"),
 }
 
@@ -614,6 +804,14 @@ ROUTES = [
     ("GET", r"/api/game/(\d+)/peek", api_peek),
     ("GET", r"/api/lobbies", api_my_lobbies),
     ("POST", r"/api/queue", api_queue),
+    ("POST", r"/api/password", api_password),
+    ("GET", r"/api/ranked-board", api_ranked_board),
+    ("GET", r"/api/profile/([A-Za-z0-9_.-]{3,20})", api_profile),
+    ("POST", r"/api/report", api_report),
+    ("GET", r"/api/admin/reports", api_admin_reports),
+    ("POST", r"/api/admin/report", api_admin_report),
+    ("GET", r"/api/admin/cheats", api_admin_cheats),
+    ("POST", r"/api/admin/cheats", api_admin_cheats),
     ("POST", r"/api/daily", api_daily),
     ("POST", r"/api/legend/enter", api_legend_enter),
     ("GET", r"/api/legends", api_legends),

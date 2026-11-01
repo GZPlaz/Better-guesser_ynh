@@ -62,7 +62,10 @@ assert 700 < far < 800, far
 users = {u["username"]: u for u in boss("admin/users")["users"]}
 assert users["bob"]["best"] == 5000 and users["bob"]["last_ip"] == "127.0.0.1"
 me_id = users["boss"]["id"]
-boss("admin/user", {"id": me_id, "action": "update", "fields": {"username": "boss", "is_admin": True, "cheat_reveal": True, "cheat_multiplier": 2}})
+# cheats are an admin-only menu: the admin turns on their own, nobody else's
+boss("admin/user", {"id": me_id, "action": "update", "fields": {"cheat_reveal": True}}, expect=400)  # not an account field
+assert boss("admin/cheats", {"cheat_reveal": True, "cheat_multiplier": 2})["cheat_multiplier"] == 2
+bob("admin/cheats", expect=403)
 boss("admin/user", {"id": me_id, "action": "update", "fields": {"username": "boss", "is_admin": False}}, expect=400)
 g2 = boss("game", {})
 assert boss(f"game/{g2['id']}/peek") == {"lat": 48.857, "lng": 2.352}
@@ -153,12 +156,29 @@ def ranked_match(p1, p2, p1_wins=True):
     return p1(f"lobby/{c1}")
 
 
+# dynamic rating: hand-checked values
+U = lambda rp=0, mmr=1500: {"rank_points": rp, "mmr": mmr}  # noqa: E731
+assert app.rating_delta("ranked", 1, U(100), U(100), 0, False) == 20  # even match: +20 / -20
+assert app.rating_delta("ranked", 0, U(100), U(100), 0, False) == -20
+assert app.rating_delta("ranked", 1, U(100), U(100), 1, False) == 40  # blowout doubles it
+assert app.rating_delta("ranked", 1, U(100), U(300), 0, False) == 36  # underdog win pays a lot...
+assert app.rating_delta("ranked", 1, U(300), U(100), 0, False) == 5  # ...a favourite's win pays the minimum
+assert app.rating_delta("ranked", 0, U(300), U(100), 0, False) == -36  # and a favourite's loss hurts
+assert app.rating_delta("ranked", 1, U(100), U(300), 1, False) == 60  # capped
+assert app.rating_delta("ranked", 0, U(10), U(10), 0, False) == -10  # RP floor at 0
+assert app.rating_delta("ranked", 0, U(100), U(100), 1, True) == 0  # rank shield
+assert app.rating_delta("legend", 1, U(), U(), 0, False) == 16
+assert app.rating_delta("legend", 0.5, U(mmr=1600), U(mmr=1400), 0, False) == -8.3  # draw vs weaker player costs a bit
+
 st = ranked_match(ben, cat)
-assert st["finished"] and {m["username"]: m["delta"] for m in st["members"]} == {"ben": 25, "cat": 0}, st  # cat had 0 RP, can't drop
-assert ben("me")["rank_points"] == 25
+d = {m["username"]: m["delta"] for m in st["members"]}
+assert st["finished"] and d["ben"] > 20 and d["cat"] == 0, st  # margin bonus; cat had 0 RP, can't drop
+assert ben("me")["rank_points"] == d["ben"]
 ben("lobby/join", {"code": st["code"]}, expect=403)  # matchmade lobbies can't be joined by code
 st = ranked_match(cat, ben, p1_wins=False)
-assert ben("me")["rank_points"] == 50 and cat("me")["rank_points"] == 0
+d2 = {m["username"]: m["delta"] for m in st["members"]}
+assert 0 < d2["ben"] < 40, (d, d2)  # a blowout between equals pays 40; ben is now the favourite, so less
+assert ben("me")["rank_points"] == d["ben"] + d2["ben"] and cat("me")["rank_points"] == 0
 
 # Legend Division: gated on the top rank, then MMR via Elo, public leaderboard
 ben("legend/enter", {}, expect=403)
@@ -171,11 +191,12 @@ assert me["rank"] == "Master" and me["legend_eligible"] and not me["legend"]
 ben("legend/enter", {})
 assert ben("me")["legend"] and ben("me")["mmr"] == 1500
 boss("admin/user", {"id": ids["dan"], "action": "update", "fields": {"legend": True}})
-st = ranked_match(ben, dan)  # both legends now -> legend queue, Elo
-assert st["mode"] == "legend" and {m["username"]: m["delta"] for m in st["members"]} == {"ben": 16, "dan": -16}, st
-assert ben("me")["rank_points"] == 524  # RP frozen in legend
+rp_before = ben("me")["rank_points"]
+st = ranked_match(ben, dan)  # both legends now -> legend queue, Elo scaled by margin
+assert st["mode"] == "legend" and {m["username"]: m["delta"] for m in st["members"]} == {"ben": 24.0, "dan": -24.0}, st
+assert ben("me")["rank_points"] == rp_before  # RP frozen in legend
 rows = client()("legends")["rows"]  # no login needed
-assert [(r["username"], r["mmr"], r["matches"]) for r in rows] == [("ben", 1516, 1), ("dan", 1484, 1)], rows
+assert [(r["username"], r["mmr"], r["matches"]) for r in rows] == [("ben", 1524, 1), ("dan", 1476, 1)], rows
 cat("queue", {"mode": "ranked"})  # non-legend queue never pairs with legends
 assert len(cat(f"lobby/{cat('queue', {'mode': 'ranked'})['code']}")["members"]) == 1
 
@@ -212,7 +233,8 @@ assert sorted(m["team"] for m in st["members"]) == ["A", "A", "B", "B"] and st["
 assert q3("queue", {"mode": "2v2"})["code"] != c2  # 5th player gets a fresh match
 
 # ---- cheats, in every playlist ----
-boss("admin/user", {"id": ids["pq1"], "action": "update", "fields": {"cheat_aim": True, "cheat_floor": 900, "cheat_shield": True}})
+boss("admin/user", {"id": ids["pq1"], "action": "update", "fields": {"is_admin": True}})
+q1("admin/cheats", {"cheat_aim": True, "cheat_floor": 900, "cheat_shield": True})
 assert q1("me")["cheat_aim"] and not q1("me")["cheat_reveal"]
 q2(f"game/{q2(f'lobby/{c2}/play', {})['id']}/peek", expect=403)
 for cl in (q2, q4, q5):
@@ -222,14 +244,20 @@ assert st["finished"] and next(m for m in st["members"] if m["username"] == "pq1
 team = next(m["team"] for m in st["members"] if m["username"] == "pq1")
 assert st["teams"][team] > st["teams"]["AB".replace(team, "")], st  # q1's team wins
 st = play(q1, q1("queue", {"mode": "ranked"})["code"], cheat=True)
-boss("admin/user", {"id": ids["pq1"], "action": "update", "fields": {"cheat_floor": 0, "rank_points": 100}})
+q1("admin/cheats", {"cheat_floor": 0})
+boss("admin/user", {"id": ids["pq1"], "action": "update", "fields": {"rank_points": 100}})
 rc = q1("queue", {"mode": "ranked"})["code"]
 play(q1, rc, 0, 0)  # loses...
 assert q4("queue", {"mode": "ranked"})["code"] == rc  # closest RP to q4's 0 is q1's 100
 play(q4, rc)
-assert {m["username"]: m["delta"] for m in q1(f"lobby/{rc}")["members"]} == {"pq4": 25, "pq1": 0}
+d = {m["username"]: m["delta"] for m in q1(f"lobby/{rc}")["members"]}
+assert d["pq1"] == 0 and d["pq4"] == 60, d  # underdog blowout win hits the cap
 assert q1("me")["rank_points"] == 100  # the shield blocked the RP loss
-boss("admin/user", {"id": ids["pq1"], "action": "update", "fields": {"cheat_floor": 1001}}, expect=400)
+q1("admin/cheats", {"cheat_floor": 1001}, expect=400)
+# demoted admins lose their cheats, even though the settings stay stored
+boss("admin/user", {"id": ids["pq1"], "action": "update", "fields": {"is_admin": False}})
+assert not q1("me")["cheat_aim"]
+q1(f"game/{q1('game', {})['id']}/peek", expect=403)
 
 # ---- daily rewards ----
 import datetime  # noqa: E402
@@ -254,6 +282,56 @@ assert r == {"day": 1, "amount": 5, "unit": "RP", "streak": 8}, r
 mmr = ben("me")["mmr"]
 assert ben("daily", {})["unit"] == "MMR" and ben("me")["mmr"] == mmr + 1  # legends get MMR
 
+# ---- profiles ----
+pr = ben("profile/ben")
+assert pr["ranked_record"] == {"w": 4, "l": 0, "d": 0}, pr  # 3 ranked wins + 1 legend win
+assert pr["casual_record"] == {"w": 1, "l": 1, "d": 0}, pr  # lost the 1v1 to ann, won the 2v2 with her
+assert pr["rank"] == "Legend" and pr["games"] >= 6 and pr["perfect_rounds"] >= 5
+client()("profile/ben", expect=401)
+ben("profile/nobody", expect=404)
+
+# ---- reports ----
+q2("report", {"username": "pq1", "reason": "cheating", "details": "x" * 900, "lobby": c2})
+q2("report", {"username": "pq1", "reason": "cheating"}, expect=409)  # one open report per player
+q2("report", {"username": "pq2", "reason": "cheating"}, expect=400)  # self
+q2("report", {"username": "pq1", "reason": "vibes"}, expect=400)
+q4("report", {"username": "pq1", "reason": "name"})
+q4("report", {"username": "pq3", "reason": "abuse"})
+q2("admin/reports", expect=403)
+assert boss("me")["open_reports"] == 3
+reps = boss("admin/reports")["reports"]
+assert len(reps[-1]["details"]) == 500 and reps[-1]["lobby_code"] == c2 and reps[-1]["reason_label"] == "Cheating"
+boss("admin/report", {"id": next(r["id"] for r in reps if r["target"] == "pq3"), "action": "dismiss"})
+boss("admin/report", {"id": reps[-1]["id"], "action": "ban"})  # banning pq1 closes both reports about them
+assert boss("me")["open_reports"] == 0
+q1("me", expect=401)
+assert {r["status"] for r in boss("admin/reports")["reports"]} == {"resolved", "dismissed"}
+
+# ---- change password ----
+q3b = client()
+q3b("login", {"username": "pq3", "password": "secret1"})
+q3("password", {"old": "nope", "new": "secret2"}, expect=403)
+q3("password", {"old": "secret1", "new": "secret2"})
+q3("me")
+q3b("me", expect=401)  # other sessions are logged out
+
+# ---- stale matches: unfilled ones close, no-shows forfeit ----
+app.MATCH_TTL = -1
+q2("lobbies")  # expires everything still pending
+app.MATCH_TTL = 86400
+sc = q2("queue", {"mode": "ranked"})["code"]
+play(q2, sc)
+assert q3("queue", {"mode": "ranked"})["code"] == sc  # joins, but never plays
+app.MATCH_TTL = -1
+st = q2(f"lobby/{sc}")
+app.MATCH_TTL = 86400
+assert st["expired"] and st["my_result"] == 1 and {m["username"]: m["result"] for m in st["members"]} == {"pq2": 1, "pq3": 0}, st
+assert q3("queue", {"mode": "ranked"})["code"] != sc  # the expired match is gone from the queue
+
+# ---- ranked leaderboard ----
+board = client()("ranked-board")["rows"]  # public
+assert all(r["rank"] for r in board) and "ben" not in [r["username"] for r in board]  # legends are listed separately
+
 # deleting a host removes their lobbies but keeps other players' games
 ben_games = lambda: next(u for u in boss("admin/users")["users"] if u["username"] == "ben")["games"]  # noqa: E731
 before = ben_games()
@@ -265,4 +343,10 @@ assert ben_games() == before
 boss("admin/settings", {"mapillary_token": "t2", "registration_open": False})
 assert boss("admin/settings") == {"mapillary_token": "t2", "registration_open": False}
 client()("register", {"username": "eve", "password": "secret1"}, expect=403)
+
+# ---- login throttling (last: it locks out this IP) ----
+x = client()
+for _ in range(10):
+    x("login", {"username": "boss", "password": "wrong"}, expect=401)
+x("login", {"username": "boss", "password": "adminpass"}, expect=429)  # even the right password, until the window passes
 print("all checks passed")
