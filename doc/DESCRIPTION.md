@@ -1,3 +1,3 @@
-Better Guesser is a self-hosted geography guessing game. You're dropped somewhere on real street-level imagery (from Mapillary), look around, and pin your guess on a world map. 5 rounds, up to 1000 points each, with a shared leaderboard for you and your friends.
+Better Guesser is a self-hosted geography guessing game. You're dropped somewhere on real street-level imagery (from Mapillary), look around, and pin your guess on a world map. 5 rounds, up to 1000 points each, with a shared leaderboard for you and your friends. Create private lobbies (free-for-all or 2v2) where everyone plays the same locations.
 
 Players create their own in-game accounts. The admin panel lists every account (created / last login / last IP / active sessions / games / scores) and lets the admin rename, ban, kick, reset passwords, wipe stats, delete, and grant admin or cheats (answer peek, score multiplier).

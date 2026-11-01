@@ -42,6 +42,12 @@ CREATE TABLE IF NOT EXISTS games(id INTEGER PRIMARY KEY, user_id INTEGER NOT NUL
 CREATE TABLE IF NOT EXISTS rounds(game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE, n INTEGER NOT NULL,
   image_id TEXT, lat REAL, lng REAL, guess_lat REAL, guess_lng REAL, distance REAL, score INTEGER, PRIMARY KEY(game_id, n));
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS lobbies(id INTEGER PRIMARY KEY, code TEXT UNIQUE NOT NULL, mode TEXT NOT NULL,
+  host_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, started INTEGER NOT NULL DEFAULT 0, created REAL);
+CREATE TABLE IF NOT EXISTS lobby_members(lobby_id INTEGER NOT NULL REFERENCES lobbies(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, team TEXT, PRIMARY KEY(lobby_id, user_id));
+CREATE TABLE IF NOT EXISTS lobby_rounds(lobby_id INTEGER NOT NULL REFERENCES lobbies(id) ON DELETE CASCADE, n INTEGER NOT NULL,
+  image_id TEXT, lat REAL, lng REAL, PRIMARY KEY(lobby_id, n));
 """
 
 
@@ -61,6 +67,9 @@ def db():
 def init_db():
     with db() as c:
         c.executescript(SCHEMA)
+        if "lobby_id" not in [r["name"] for r in c.execute("PRAGMA table_info(games)")]:  # v0.1 databases
+            c.execute("ALTER TABLE games ADD COLUMN lobby_id INTEGER REFERENCES lobbies(id) ON DELETE SET NULL")
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS games_lobby_user ON games(lobby_id, user_id) WHERE lobby_id IS NOT NULL")
         c.execute("INSERT OR IGNORE INTO settings VALUES('registration_open','1')")
 
 
@@ -186,11 +195,21 @@ def game_state(u, gid):
     n = len(played) + 1
     cur = c.execute("SELECT image_id FROM rounds WHERE game_id=? AND n=?", (gid, n)).fetchone()
     if not cur:
-        image_id, lat, lng = pick_location(state["token"])  # network call, outside any transaction
+        # network call, outside any transaction; lobby games share one set of locations
+        image_id, lat, lng = lobby_location(c, g["lobby_id"], n, state["token"]) if g["lobby_id"] else pick_location(state["token"])
         with c:
             c.execute("INSERT OR IGNORE INTO rounds(game_id,n,image_id,lat,lng) VALUES(?,?,?,?,?)", (gid, n, image_id, lat, lng))
         cur = c.execute("SELECT image_id FROM rounds WHERE game_id=? AND n=?", (gid, n)).fetchone()
     return {**state, "round": n, "image_id": cur["image_id"]}
+
+
+def lobby_location(c, lobby_id, n, token):
+    q = "SELECT image_id, lat, lng FROM lobby_rounds WHERE lobby_id=? AND n=?"
+    if not c.execute(q, (lobby_id, n)).fetchone():
+        loc = pick_location(token)
+        with c:
+            c.execute("INSERT OR IGNORE INTO lobby_rounds VALUES(?,?,?,?,?)", (lobby_id, n, *loc))
+    return tuple(c.execute(q, (lobby_id, n)).fetchone())
 
 
 def api_new_game(h, b):
@@ -248,6 +267,113 @@ def api_leaderboard(h, b):
         FROM users u LEFT JOIN games g ON g.user_id=u.id AND g.done=1 WHERE u.banned=0
         GROUP BY u.id ORDER BY best DESC, points DESC LIMIT 50""").fetchall()
     return {"rows": [dict(r) for r in rows]}
+
+
+def get_lobby(code):
+    lb = db().execute("SELECT * FROM lobbies WHERE code=?", (str(code).strip().upper(),)).fetchone()
+    if not lb:
+        raise Err(404, "No lobby with that code")
+    return lb
+
+
+def lobby_state(u, code):
+    lb, c = get_lobby(code), db()
+    rows = c.execute("""SELECT u.id, u.username, m.team, g.id game_id, COALESCE(g.total,0) total, COALESCE(g.done,0) done,
+        (SELECT COUNT(*) FROM rounds r WHERE r.game_id=g.id AND r.score IS NOT NULL) played
+        FROM lobby_members m JOIN users u ON u.id=m.user_id
+        LEFT JOIN games g ON g.lobby_id=m.lobby_id AND g.user_id=m.user_id
+        WHERE m.lobby_id=? ORDER BY total DESC, u.username""", (lb["id"],)).fetchall()
+    me = next((r for r in rows if r["id"] == u["id"]), None)
+    if not me:
+        raise Err(403, "Join this lobby first")
+    teams = {}
+    for r in rows:
+        if r["team"]:
+            teams[r["team"]] = teams.get(r["team"], 0) + r["total"]
+    return {"code": lb["code"], "mode": lb["mode"], "started": bool(lb["started"]), "is_host": lb["host_id"] == u["id"],
+            "rounds": ROUNDS, "teams": teams, "my_team": me["team"], "my_done": bool(me["done"]),
+            "finished": bool(lb["started"]) and all(r["done"] for r in rows),
+            "members": [{k: r[k] for k in ("username", "team", "total", "played", "done")} | {"host": r["id"] == lb["host_id"]} for r in rows]}
+
+
+def api_lobby_create(h, b):
+    u = h.user()
+    mode = b.get("mode")
+    if mode not in ("ffa", "2v2"):
+        raise Err(400, "Mode must be ffa or 2v2")
+    with db() as c:
+        for _ in range(5):
+            code = "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(6))
+            try:
+                lid = c.execute("INSERT INTO lobbies(code,mode,host_id,created) VALUES(?,?,?,?)", (code, mode, u["id"], time.time())).lastrowid
+                break
+            except sqlite3.IntegrityError:
+                continue
+        c.execute("INSERT INTO lobby_members VALUES(?,?,?)", (lid, u["id"], "A" if mode == "2v2" else None))
+    return lobby_state(u, code)
+
+
+def api_lobby_join(h, b):
+    """Join a lobby, or (2v2) switch team. Only before the host starts it."""
+    u, lb = h.user(), get_lobby(b.get("code", ""))
+    if lb["started"]:
+        raise Err(409, "This lobby already started")
+    c = db()
+    others = c.execute("SELECT team FROM lobby_members WHERE lobby_id=? AND user_id!=?", (lb["id"], u["id"])).fetchall()
+    team = None
+    if lb["mode"] == "2v2":
+        counts = {t: sum(r["team"] == t for r in others) for t in "AB"}
+        team = b.get("team") or min("AB", key=counts.get)
+        if team not in counts:
+            raise Err(400, "Team must be A or B")
+        if counts[team] >= 2:
+            raise Err(409, f"Team {team} is full")
+    elif len(others) >= 20:
+        raise Err(409, "Lobby is full")
+    with c:
+        c.execute("INSERT INTO lobby_members VALUES(?,?,?) ON CONFLICT(lobby_id,user_id) DO UPDATE SET team=excluded.team",
+                  (lb["id"], u["id"], team))
+    return lobby_state(u, lb["code"])
+
+
+def api_lobby(h, b, code):
+    return lobby_state(h.user(), code)
+
+
+def api_lobby_start(h, b, code):
+    u, lb = h.user(), get_lobby(code)
+    if lb["host_id"] != u["id"]:
+        raise Err(403, "Only the host can start")
+    teams = [r["team"] for r in db().execute("SELECT team FROM lobby_members WHERE lobby_id=?", (lb["id"],))]
+    if lb["mode"] == "2v2" and sorted(teams) != ["A", "A", "B", "B"]:
+        raise Err(409, "2v2 needs exactly 2 players on each team")
+    if lb["mode"] == "ffa" and len(teams) < 2:
+        raise Err(409, "Need at least 2 players")
+    with db() as c:
+        c.execute("UPDATE lobbies SET started=1 WHERE id=?", (lb["id"],))
+    return lobby_state(u, code)
+
+
+def api_lobby_play(h, b, code):
+    u = h.user()
+    st, lb = lobby_state(u, code), get_lobby(code)  # lobby_state checks membership
+    if not st["started"]:
+        raise Err(409, "The host hasn't started yet")
+    if not setting("mapillary_token"):
+        raise Err(503, "The admin has not set a Mapillary token yet")
+    with db() as c:
+        c.execute("INSERT OR IGNORE INTO games(user_id, started, lobby_id) VALUES(?,?,?)", (u["id"], time.time(), lb["id"]))
+        gid = c.execute("SELECT id FROM games WHERE lobby_id=? AND user_id=?", (lb["id"], u["id"])).fetchone()["id"]
+    return game_state(u, gid)
+
+
+def api_my_lobbies(h, b):
+    u = h.user()
+    rows = db().execute("""SELECT l.code, l.mode, l.started, hu.username host,
+        (SELECT COUNT(*) FROM lobby_members x WHERE x.lobby_id=l.id) players
+        FROM lobby_members m JOIN lobbies l ON l.id=m.lobby_id JOIN users hu ON hu.id=l.host_id
+        WHERE m.user_id=? ORDER BY l.id DESC LIMIT 20""", (u["id"],)).fetchall()
+    return {"lobbies": [dict(r) for r in rows]}
 
 
 def api_admin_users(h, b):
@@ -317,6 +443,12 @@ ROUTES = [
     ("GET", r"/api/game/(\d+)", api_game),
     ("POST", r"/api/game/(\d+)/guess", api_guess),
     ("GET", r"/api/game/(\d+)/peek", api_peek),
+    ("GET", r"/api/lobbies", api_my_lobbies),
+    ("POST", r"/api/lobby", api_lobby_create),
+    ("POST", r"/api/lobby/join", api_lobby_join),
+    ("GET", r"/api/lobby/([A-Za-z0-9]{6})", api_lobby),
+    ("POST", r"/api/lobby/([A-Za-z0-9]{6})/start", api_lobby_start),
+    ("POST", r"/api/lobby/([A-Za-z0-9]{6})/play", api_lobby_play),
     ("GET", r"/api/admin/users", api_admin_users),
     ("POST", r"/api/admin/user", api_admin_user),
     ("GET", r"/api/admin/settings", api_admin_settings),

@@ -1,11 +1,15 @@
 """End-to-end self-check: python3 tests/test_app.py (no network; Mapillary is stubbed)."""
-import http.cookiejar, io, json, os, sys, tempfile, threading, urllib.error, urllib.request
+import http.cookiejar, io, itertools, sqlite3, json, os, sys, tempfile, threading, urllib.error, urllib.request
 
 os.environ["BG_DB"] = os.path.join(tempfile.mkdtemp(), "t.db")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import app  # noqa: E402
 
-app.pick_location = lambda token: ("img1", 48.857, 2.352)  # Paris
+# Seed a v0.1-style database (no lobby columns) to prove the upgrade migration works.
+sqlite3.connect(os.environ["BG_DB"]).executescript(
+    "CREATE TABLE games(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, started REAL, total INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0);")
+_imgs = itertools.count(1)
+app.pick_location = lambda token: (f"img{next(_imgs)}", 48.857, 2.352)  # always Paris, new image each call
 sys.stdin = io.StringIO("adminpass\n")
 app.cli_init("boss", "tok")
 srv = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
@@ -39,7 +43,7 @@ assert urllib.request.urlopen(BASE).read().startswith(b"<!doctype html>")
 
 # bob plays a full game: guesses Paris exactly every round -> 5 * 1000
 g = bob("game", {})
-assert g["round"] == 1 and g["image_id"] == "img1"
+assert g["round"] == 1 and g["image_id"].startswith("img")
 bob(f"game/{g['id']}/peek", expect=403)
 for n in range(1, 6):
     r = bob(f"game/{g['id']}/guess", {"lat": 48.857, "lng": 2.352 + 360})  # wrapped longitude
@@ -77,6 +81,59 @@ assert next(u for u in boss("admin/users")["users"] if u["id"] == bob_id)["games
 boss("admin/user", {"id": me_id, "action": "delete"}, expect=400)
 boss("admin/user", {"id": bob_id, "action": "delete"})
 bob("me", expect=401)
+
+# ---- lobbies ----
+players = {n: client() for n in ("ann", "ben", "cat", "dan")}
+for n, cl in players.items():
+    cl("register", {"username": n, "password": "secret1"})
+ann, ben, cat, dan = players.values()
+
+# free-for-all: same locations for everyone, separate scores
+ffa = ann("lobby", {"mode": "ffa"})
+code = ffa["code"]
+ben(f"lobby/{code}", expect=403)  # not a member yet
+ann(f"lobby/{code}/start", {}, expect=409)  # alone
+ben("lobby/join", {"code": code.lower()})
+ben(f"lobby/{code}/start", {}, expect=403)  # not host
+ben(f"lobby/{code}/play", {}, expect=409)  # not started
+ann(f"lobby/{code}/start", {})
+cat("lobby/join", {"code": code}, expect=409)  # too late
+ga, gb = ann(f"lobby/{code}/play", {}), ben(f"lobby/{code}/play", {})
+assert ann(f"lobby/{code}/play", {})["id"] == ga["id"]  # one game per player per lobby
+for n in range(1, 6):
+    assert ga["image_id"] == gb["image_id"], (n, ga, gb)
+    ann(f"game/{ga['id']}/guess", {"lat": 48.857, "lng": 2.352})
+    ben(f"game/{gb['id']}/guess", {"lat": 51.507, "lng": -0.128})  # London: worse
+    if n < 5:
+        ga, gb = ann(f"game/{ga['id']}"), ben(f"game/{gb['id']}")
+st = ann(f"lobby/{code}")
+assert st["finished"] and [m["username"] for m in st["members"]] == ["ann", "ben"] and st["members"][0]["total"] == 5000, st
+assert [lb["code"] for lb in ben("lobbies")["lobbies"]] == [code]
+
+# 2v2: auto-balanced teams, max 2 per team, team score = sum
+v = ann("lobby", {"mode": "2v2"})
+code = v["code"]
+assert v["my_team"] == "A"
+ben("lobby/join", {"code": code, "team": "A"})
+cat("lobby/join", {"code": code, "team": "A"}, expect=409)  # A full
+assert cat("lobby/join", {"code": code})["my_team"] == "B"  # auto-picks the open team
+ann(f"lobby/{code}/start", {}, expect=409)  # 3 players
+dan("lobby/join", {"code": code, "team": "C"}, expect=400)
+dan("lobby/join", {"code": code, "team": "B"})
+ann(f"lobby/{code}/start", {})
+for cl, lat, lng in ((ann, 48.857, 2.352), (ben, 48.857, 2.352), (cat, 51.507, -0.128), (dan, 51.507, -0.128)):
+    g = cl(f"lobby/{code}/play", {})
+    for n in range(5):
+        cl(f"game/{g['id']}/guess", {"lat": lat, "lng": lng})
+        g = cl(f"game/{g['id']}")
+st = dan(f"lobby/{code}")
+assert st["finished"] and st["teams"]["A"] == 10000 and st["teams"]["B"] == 2 * 5 * far, st
+
+# deleting a host removes their lobbies but keeps other players' games
+ann_id = next(u["id"] for u in boss("admin/users")["users"] if u["username"] == "ann")
+boss("admin/user", {"id": ann_id, "action": "delete"})
+ben(f"lobby/{code}", expect=404)
+assert next(u for u in boss("admin/users")["users"] if u["username"] == "ben")["games"] == 2
 
 # settings + closed sign-ups
 boss("admin/settings", {"mapillary_token": "t2", "registration_open": False})

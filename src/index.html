@@ -51,9 +51,25 @@
 
   <section id="v-home"><div class="card">
     <p>You get dropped somewhere on Earth. Look around, then pin where you think you are. 5 rounds, up to 1000 points each.</p>
-    <button id="play">▶ Play</button> <span class="msg" id="homemsg"></span>
+    <button id="play">▶ Play solo</button> <span class="msg" id="homemsg"></span>
+    <h2>Play with friends</h2>
+    <p style="color:var(--mute)">Make a lobby, send your friends the code. Everyone gets the same 5 places; play whenever you like and compare scores.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <button class="ghost" data-mode="ffa">+ Free-for-all lobby</button><button class="ghost" data-mode="2v2">+ 2v2 lobby</button>
+      <form id="joinform" style="display:flex;gap:6px"><input id="joincode" placeholder="Lobby code" maxlength="6" size="9" aria-label="Lobby code"><button>Join</button></form>
+    </div>
+    <ul id="mylobbies"></ul>
     <h2>Leaderboard</h2>
     <table><thead><tr><th>#</th><th>Player</th><th class="num">Best game</th><th class="num">Games</th><th class="num">All-time points</th></tr></thead><tbody id="lb"></tbody></table>
+  </div></section>
+
+  <section id="v-lobby"><div class="card">
+    <h2>Lobby <span id="l-code" style="color:var(--acc);letter-spacing:3px"></span> <small id="l-mode" style="color:var(--mute)"></small></h2>
+    <p id="l-info"></p>
+    <div id="l-teams" style="display:flex;gap:8px;margin-bottom:12px"></div>
+    <table><thead><tr><th>Player</th><th>Team</th><th class="num">Rounds</th><th class="num">Score</th></tr></thead><tbody id="l-members"></tbody></table>
+    <p style="display:flex;gap:8px;margin-top:16px"><button id="l-start" hidden>Start lobby</button><button id="l-play" hidden>▶ Play</button></p>
+    <div class="msg" id="l-msg"></div>
   </div></section>
 
   <section id="v-game">
@@ -92,7 +108,7 @@
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 const when = t => t ? new Date(t * 1000).toLocaleString() : '—';
-let me = null, game = null, viewer = null, gmap = null, rmap = null, guessMarker = null, peekMarker = null, rLayer = null;
+let me = null, game = null, lobbyCode = null, lobbyTimer = null, viewer = null, gmap = null, rmap = null, guessMarker = null, peekMarker = null, rLayer = null;
 
 async function api(path, body) {
   const opt = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
@@ -103,6 +119,7 @@ async function api(path, body) {
 }
 
 function show(id) {
+  clearInterval(lobbyTimer);
   document.querySelectorAll('main > section').forEach(s => s.classList.toggle('on', s.id === id));
   if (id !== 'v-game' && id !== 'v-result') $('#hud').textContent = '';
 }
@@ -137,14 +154,62 @@ $('#signup').onclick = () => auth('register');
 async function home() {
   show('v-home');
   const { rows } = await api('leaderboard');
+  api('lobbies').then(({ lobbies }) => $('#mylobbies').innerHTML = lobbies.map(l =>
+    `<li><a href="#" data-code="${l.code}">${l.code}</a> · ${l.mode === '2v2' ? '2v2' : 'free-for-all'} · host ${esc(l.host)} · ${l.players} players${l.started ? '' : ' · waiting'}</li>`).join(''));
   $('#lb').innerHTML = rows.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.username)}</td><td class="num">${r.best}</td>` +
     `<td class="num">${r.games}</td><td class="num">${r.points}</td></tr>`).join('');
 }
 $('#play').onclick = async () => {
   $('#play').disabled = true; $('#homemsg').textContent = 'Finding a spot…';
-  try { game = await api('game', {}); $('#homemsg').textContent = ''; round(); }
+  try { lobbyCode = null; game = await api('game', {}); $('#homemsg').textContent = ''; round(); }
   catch (e) { $('#homemsg').textContent = e.message; }
   $('#play').disabled = false;
+};
+
+// ---------- lobbies ----------
+document.querySelectorAll('[data-mode]').forEach(b => b.onclick = async () => {
+  try { lobby((await api('lobby', { mode: b.dataset.mode })).code); } catch (e) { $('#homemsg').textContent = e.message; }
+});
+$('#joinform').onsubmit = async e => {
+  e.preventDefault();
+  try { lobby((await api('lobby/join', { code: $('#joincode').value })).code); } catch (err) { $('#homemsg').textContent = err.message; }
+};
+$('#mylobbies').onclick = e => { if (e.target.dataset.code) { e.preventDefault(); lobby(e.target.dataset.code); } };
+
+async function lobby(code) {
+  lobbyCode = code; show('v-lobby');
+  await paintLobby();
+  lobbyTimer = setInterval(paintLobby, 3000);  // shortcut: polling, not websockets; fine for a handful of friends
+}
+async function paintLobby() {
+  let l;
+  try { l = await api('lobby/' + lobbyCode); } catch (e) { $('#l-msg').textContent = e.message; return; }
+  const duo = l.mode === '2v2';
+  $('#l-code').textContent = l.code; $('#l-mode').textContent = duo ? '2v2' : 'free-for-all';
+  const best = Math.max(...Object.values(l.teams));
+  $('#l-teams').innerHTML = !duo ? '' : ['A', 'B'].map(t => `<div class="card" style="margin:0;flex:1;padding:12px">
+    <b>Team ${t}</b> ${l.finished && l.teams[t] === best ? '🏆' : ''}<br><span style="font-size:24px">${l.teams[t] ?? 0}</span><br>
+    ${!l.started && l.my_team !== t ? `<button class="ghost" data-team="${t}">Switch to ${t}</button>` : ''}</div>`).join('');
+  $('#l-members').innerHTML = l.members.map((m, i) => `<tr><td>${l.finished && !duo && i === 0 ? '🏆 ' : ''}${esc(m.username)}${m.host ? ' (host)' : ''}</td>
+    <td>${m.team ?? '—'}</td><td class="num">${m.played}/${l.rounds}</td><td class="num">${m.total}</td></tr>`).join('');
+  $('#l-info').textContent = l.finished ? 'Everyone is done. Final results:' : l.started ? 'Started: play your 5 rounds, scores update live.'
+    : l.is_host ? `Share the code ${l.code} with your friends, then press Start.${duo ? ' You need 2 players on each team.' : ''}`
+    : 'Waiting for the host to start…';
+  $('#l-start').hidden = !l.is_host || l.started;
+  $('#l-play').hidden = !l.started || l.my_done;
+}
+$('#l-teams').onclick = async e => {
+  if (!e.target.dataset.team) return;
+  try { await api('lobby/join', { code: lobbyCode, team: e.target.dataset.team }); $('#l-msg').textContent = ''; paintLobby(); }
+  catch (err) { $('#l-msg').textContent = err.message; }
+};
+$('#l-start').onclick = async () => {
+  try { await api(`lobby/${lobbyCode}/start`, {}); $('#l-msg').textContent = ''; paintLobby(); } catch (e) { $('#l-msg').textContent = e.message; }
+};
+$('#l-play').onclick = async () => {
+  $('#l-play').disabled = true;
+  try { game = await api(`lobby/${lobbyCode}/play`, {}); game.done ? paintLobby() : round(); } catch (e) { $('#l-msg').textContent = e.message; }
+  $('#l-play').disabled = false;
 };
 
 // ---------- game ----------
@@ -199,12 +264,12 @@ $('#guess').onclick = async () => {
   const km = r.distance_km < 1 ? `${Math.round(r.distance_km * 1000)} m` : `${Math.round(r.distance_km).toLocaleString()} km`;
   $('#rtext').textContent = `${km} away · +${r.score} points`;
   $('#rsub').textContent = r.done ? `Game over! Final score: ${r.total}` : `Total so far: ${r.total}`;
-  $('#next').textContent = r.done ? 'Back to leaderboard' : 'Next round';
+  $('#next').textContent = r.done ? (lobbyCode ? 'Back to lobby' : 'Back to leaderboard') : 'Next round';
   game.done = r.done;
 };
 
 $('#next').onclick = async () => {
-  if (game.done) return home();
+  if (game.done) return lobbyCode ? lobby(lobbyCode) : home();
   $('#next').disabled = true;
   try { game = await api(`game/${game.id}`); round(); } catch (e) { alert(e.message); }
   $('#next').disabled = false;
