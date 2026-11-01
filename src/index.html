@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Better Guesser</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/mapillary-js@4.1.2/dist/mapillary.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/mapillary-js@4.1.2/dist/mapillary.js"></script>
+<style>
+  :root { --bg:#10141c; --card:#1b2230; --fg:#e8ecf3; --mute:#8a96aa; --acc:#3ddc97; --bad:#ff6b6b; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  header { display:flex; gap:16px; align-items:center; padding:10px 16px; background:var(--card); }
+  header b { font-size:18px; } #hud { color:var(--acc); font-weight:600; } nav { margin-left:auto; display:flex; gap:8px; align-items:center; }
+  button { background:var(--acc); color:#06210f; border:0; border-radius:6px; padding:8px 14px; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--fg); border:1px solid #3a4558; } button.bad { background:var(--bad); color:#fff; }
+  button:disabled { opacity:.4; cursor:default; }
+  input { background:#0c1017; color:var(--fg); border:1px solid #3a4558; border-radius:6px; padding:8px; }
+  main > section { display:none; } main > section.on { display:block; }
+  .card { background:var(--card); border-radius:10px; padding:20px; max-width:900px; margin:24px auto; }
+  .msg { color:var(--bad); min-height:1.4em; }
+  table { width:100%; border-collapse:collapse; } th, td { padding:6px 8px; text-align:left; border-bottom:1px solid #2a3344; }
+  th { color:var(--mute); font-weight:500; } td.num { text-align:right; }
+  #v-game { position:relative; height:calc(100vh - 52px); }
+  #pano { position:absolute; inset:0; }
+  #guessbox { position:absolute; right:16px; bottom:16px; z-index:10; width:300px; transition:width .2s; display:flex; flex-direction:column; gap:6px; }
+  #guessbox:hover, #guessbox:focus-within { width:min(600px, 90vw); }
+  #gmap { height:200px; border-radius:8px; transition:height .2s; } #guessbox:hover #gmap { height:400px; }
+  #guessbox .row { display:flex; gap:6px; } #guessbox .row button:first-child { flex:1; }
+  #rmap { height:60vh; }
+  #admin-table input[type=text] { width:110px; } #admin-table input[type=number] { width:60px; }
+  #admin-table td { font-size:13px; white-space:nowrap; } .scroll { overflow-x:auto; }
+  .actions button { padding:4px 8px; font-size:12px; margin-right:4px; }
+  @media (max-width:600px) { #guessbox, #guessbox:hover { width:calc(100vw - 32px); } }
+</style>
+</head>
+<body>
+<header><b>🌍 Better Guesser</b><span id="hud"></span><nav id="nav"></nav></header>
+<main>
+  <section id="v-auth"><div class="card" style="max-width:360px">
+    <h2>Welcome</h2>
+    <form id="authform" style="display:flex;flex-direction:column;gap:10px">
+      <input id="username" placeholder="Username" autocomplete="username" required>
+      <input id="password" type="password" placeholder="Password" autocomplete="current-password" required>
+      <div style="display:flex;gap:8px"><button>Log in</button><button type="button" class="ghost" id="signup">Sign up</button></div>
+      <div class="msg" id="authmsg"></div>
+    </form>
+  </div></section>
+
+  <section id="v-home"><div class="card">
+    <p>You get dropped somewhere on Earth. Look around, then pin where you think you are. 5 rounds, up to 1000 points each.</p>
+    <button id="play">▶ Play</button> <span class="msg" id="homemsg"></span>
+    <h2>Leaderboard</h2>
+    <table><thead><tr><th>#</th><th>Player</th><th class="num">Best game</th><th class="num">Games</th><th class="num">All-time points</th></tr></thead><tbody id="lb"></tbody></table>
+  </div></section>
+
+  <section id="v-game">
+    <div id="pano"></div>
+    <div id="guessbox">
+      <div id="gmap"></div>
+      <div class="row"><button id="guess" disabled>Guess</button><button id="peek" class="ghost" title="Peek" hidden>👁</button></div>
+    </div>
+  </section>
+
+  <section id="v-result">
+    <div id="rmap"></div>
+    <div class="card" style="text-align:center"><h2 id="rtext"></h2><p id="rsub"></p><button id="next">Next round</button></div>
+  </section>
+
+  <section id="v-admin">
+    <div class="card" style="max-width:1300px">
+      <h2>Accounts</h2>
+      <div class="scroll"><table id="admin-table"><thead><tr>
+        <th>ID</th><th>Username</th><th>Created</th><th>Last login</th><th>Last IP</th><th class="num">Sessions</th>
+        <th class="num">Games</th><th class="num">Best</th><th class="num">Points</th>
+        <th>Admin</th><th>Banned</th><th title="Can peek at the answer">Peek cheat</th><th title="Score multiplier">× Score</th><th></th>
+      </tr></thead><tbody></tbody></table></div>
+      <div class="msg" id="adminmsg"></div>
+      <h2>Settings</h2>
+      <form id="settings" style="display:flex;flex-direction:column;gap:10px;max-width:520px">
+        <label>Mapillary client token (get one free at mapillary.com/dashboard/developers)<br><input id="s-token" style="width:100%"></label>
+        <label><input type="checkbox" id="s-reg"> Allow new sign-ups</label>
+        <div><button>Save settings</button></div>
+      </form>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+const when = t => t ? new Date(t * 1000).toLocaleString() : '—';
+let me = null, game = null, viewer = null, gmap = null, rmap = null, guessMarker = null, peekMarker = null, rLayer = null;
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+  const r = await fetch('api/' + path, opt);  // relative: works when installed under a sub-path
+  const j = await r.json().catch(() => ({ error: r.statusText }));
+  if (!r.ok) throw new Error(j.error || r.status);
+  return j;
+}
+
+function show(id) {
+  document.querySelectorAll('main > section').forEach(s => s.classList.toggle('on', s.id === id));
+  if (id !== 'v-game' && id !== 'v-result') $('#hud').textContent = '';
+}
+
+function nav() {
+  $('#nav').innerHTML = me ? `<span>${esc(me.username)}</span><button class="ghost" data-go="home">Home</button>` +
+    (me.is_admin ? '<button class="ghost" data-go="admin">Admin</button>' : '') + '<button class="ghost" data-go="logout">Log out</button>' : '';
+}
+$('#nav').onclick = async e => {
+  const go = e.target.dataset.go;
+  if (go === 'home') home();
+  if (go === 'admin') admin();
+  if (go === 'logout') { await api('logout', {}); me = null; start(); }
+};
+
+async function start() {
+  try { me = await api('me'); } catch { me = null; }
+  nav();
+  me ? home() : show('v-auth');
+}
+
+// ---------- auth ----------
+async function auth(kind) {
+  $('#authmsg').textContent = '';
+  try { await api(kind, { username: $('#username').value, password: $('#password').value }); start(); }
+  catch (e) { $('#authmsg').textContent = e.message; }
+}
+$('#authform').onsubmit = e => { e.preventDefault(); auth('login'); };
+$('#signup').onclick = () => auth('register');
+
+// ---------- home ----------
+async function home() {
+  show('v-home');
+  const { rows } = await api('leaderboard');
+  $('#lb').innerHTML = rows.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.username)}</td><td class="num">${r.best}</td>` +
+    `<td class="num">${r.games}</td><td class="num">${r.points}</td></tr>`).join('');
+}
+$('#play').onclick = async () => {
+  $('#play').disabled = true; $('#homemsg').textContent = 'Finding a spot…';
+  try { game = await api('game', {}); $('#homemsg').textContent = ''; round(); }
+  catch (e) { $('#homemsg').textContent = e.message; }
+  $('#play').disabled = false;
+};
+
+// ---------- game ----------
+function hud() { $('#hud').textContent = `Round ${game.round ?? game.rounds} / ${game.rounds} · ${game.total} pts`; }
+
+function round() {
+  show('v-game'); hud();
+  if (!viewer) {
+    viewer = new mapillary.Viewer({ accessToken: game.token, container: 'pano', imageId: game.image_id, component: { cover: false } });
+  } else { viewer.resize(); viewer.moveTo(game.image_id).catch(() => {}); }
+  if (!gmap) {
+    gmap = L.map('gmap', { worldCopyJump: true }).setView([20, 0], 1);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(gmap);
+    gmap.on('click', e => {
+      guessMarker ? guessMarker.setLatLng(e.latlng) : (guessMarker = L.marker(e.latlng).addTo(gmap));
+      $('#guess').disabled = false;
+    });
+    new ResizeObserver(() => gmap.invalidateSize()).observe($('#gmap'));
+  }
+  [guessMarker, peekMarker].forEach(m => m && m.remove());
+  guessMarker = peekMarker = null;
+  $('#guess').disabled = true;
+  $('#peek').hidden = !me.cheat_reveal;
+  gmap.setView([20, 0], 1);
+  setTimeout(() => gmap.invalidateSize());
+}
+
+$('#peek').onclick = async () => {
+  const a = await api(`game/${game.id}/peek`);
+  if (peekMarker) peekMarker.remove();
+  peekMarker = L.circleMarker([a.lat, a.lng], { radius: 4, color: '#ff4fd8', opacity: .6 }).addTo(gmap);
+};
+
+$('#guess').onclick = async () => {
+  $('#guess').disabled = true;
+  const ll = guessMarker.getLatLng().wrap();
+  let r;
+  try { r = await api(`game/${game.id}/guess`, { lat: ll.lat, lng: ll.lng }); }
+  catch (e) { alert(e.message); $('#guess').disabled = false; return; }
+  game.total = r.total;
+  show('v-result'); hud();
+  if (!rmap) {
+    rmap = L.map('rmap');
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(rmap);
+  }
+  if (rLayer) rLayer.remove();
+  const a = [r.answer.lat, r.answer.lng], g = [r.guess.lat, r.guess.lng];
+  rLayer = L.layerGroup([L.marker(g).bindTooltip('You'), L.circleMarker(a, { radius: 9, color: '#3ddc97', fillOpacity: 1 }).bindTooltip('Here!'),
+    L.polyline([g, a], { dashArray: '6 6', color: '#fff' })]).addTo(rmap);
+  rmap.invalidateSize();
+  rmap.fitBounds([g, a], { padding: [40, 40], maxZoom: 12 });
+  const km = r.distance_km < 1 ? `${Math.round(r.distance_km * 1000)} m` : `${Math.round(r.distance_km).toLocaleString()} km`;
+  $('#rtext').textContent = `${km} away · +${r.score} points`;
+  $('#rsub').textContent = r.done ? `Game over! Final score: ${r.total}` : `Total so far: ${r.total}`;
+  $('#next').textContent = r.done ? 'Back to leaderboard' : 'Next round';
+  game.done = r.done;
+};
+
+$('#next').onclick = async () => {
+  if (game.done) return home();
+  $('#next').disabled = true;
+  try { game = await api(`game/${game.id}`); round(); } catch (e) { alert(e.message); }
+  $('#next').disabled = false;
+};
+
+// ---------- admin ----------
+async function admin() {
+  show('v-admin');
+  const [{ users }, s] = await Promise.all([api('admin/users'), api('admin/settings')]);
+  $('#s-token').value = s.mapillary_token; $('#s-reg').checked = s.registration_open;
+  const box = (k, on) => `<input type="checkbox" data-f="${k}" ${on ? 'checked' : ''}>`;
+  $('#admin-table tbody').innerHTML = users.map(u => `<tr data-id="${u.id}">
+    <td>${u.id}</td><td><input type="text" data-f="username" value="${esc(u.username)}"></td>
+    <td>${when(u.created)}</td><td>${when(u.last_login)}</td><td>${esc(u.last_ip || '—')}</td><td class="num">${u.sessions}</td>
+    <td class="num">${u.finished || 0}/${u.games}</td><td class="num">${u.best}</td><td class="num">${u.points}</td>
+    <td>${box('is_admin', u.is_admin)}</td><td>${box('banned', u.banned)}</td><td>${box('cheat_reveal', u.cheat_reveal)}</td>
+    <td><input type="number" data-f="cheat_multiplier" value="${u.cheat_multiplier}" min="0" max="100" step="0.1"></td>
+    <td class="actions"><button data-act="update">Save</button><button class="ghost" data-act="password">Set password</button>
+      <button class="ghost" data-act="logout">Kick</button><button class="ghost" data-act="reset_stats">Reset stats</button>
+      <button class="bad" data-act="delete">Delete</button></td></tr>`).join('');
+}
+
+$('#admin-table').onclick = async e => {
+  const act = e.target.dataset.act; if (!act) return;
+  const tr = e.target.closest('tr'), name = tr.querySelector('[data-f=username]').value, body = { id: +tr.dataset.id, action: act };
+  if (act === 'update') {
+    body.fields = {};
+    tr.querySelectorAll('[data-f]').forEach(i => body.fields[i.dataset.f] = i.type === 'checkbox' ? i.checked : i.value);
+  }
+  if (act === 'password' && !(body.password = prompt(`New password for ${name}:`))) return;
+  if ((act === 'delete' || act === 'reset_stats') && !confirm(`${act === 'delete' ? 'Delete account' : 'Wipe all games of'} ${name}?`)) return;
+  $('#adminmsg').textContent = '';
+  try { await api('admin/user', body); me = await api('me'); nav(); admin(); } catch (err) { $('#adminmsg').textContent = err.message; }
+};
+
+$('#settings').onsubmit = async e => {
+  e.preventDefault();
+  try { await api('admin/settings', { mapillary_token: $('#s-token').value, registration_open: $('#s-reg').checked }); $('#adminmsg').textContent = 'Settings saved.'; }
+  catch (err) { $('#adminmsg').textContent = err.message; }
+};
+
+start();
+</script>
+</body>
+</html>

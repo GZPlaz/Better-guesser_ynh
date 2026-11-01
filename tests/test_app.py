@@ -1,0 +1,85 @@
+"""End-to-end self-check: python3 tests/test_app.py (no network; Mapillary is stubbed)."""
+import http.cookiejar, io, json, os, sys, tempfile, threading, urllib.error, urllib.request
+
+os.environ["BG_DB"] = os.path.join(tempfile.mkdtemp(), "t.db")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+import app  # noqa: E402
+
+app.pick_location = lambda token: ("img1", 48.857, 2.352)  # Paris
+sys.stdin = io.StringIO("adminpass\n")
+app.cli_init("boss", "tok")
+srv = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+BASE = f"http://127.0.0.1:{srv.server_port}/"
+
+
+def client():
+    op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+
+    def call(path, body=None, expect=200):
+        req = urllib.request.Request(BASE + "api/" + path, None if body is None else json.dumps(body).encode(),
+                                     {"Content-Type": "application/json"})
+        try:
+            with op.open(req) as r:
+                code, data = r.status, json.load(r)
+        except urllib.error.HTTPError as e:
+            code, data = e.code, json.load(e)
+        assert code == expect, (path, code, data)
+        return data
+    return call
+
+
+boss, bob = client(), client()
+boss("login", {"username": "boss", "password": "adminpass"})
+assert boss("me")["is_admin"]
+bob("register", {"username": "bob", "password": "secret1"})
+bob("register", {"username": "bob", "password": "secret1"}, expect=409)
+bob("admin/users", expect=403)
+assert urllib.request.urlopen(BASE).read().startswith(b"<!doctype html>")
+
+# bob plays a full game: guesses Paris exactly every round -> 5 * 1000
+g = bob("game", {})
+assert g["round"] == 1 and g["image_id"] == "img1"
+bob(f"game/{g['id']}/peek", expect=403)
+for n in range(1, 6):
+    r = bob(f"game/{g['id']}/guess", {"lat": 48.857, "lng": 2.352 + 360})  # wrapped longitude
+    assert r["score"] == 1000 and r["done"] == (n == 5), r
+    if n < 5:
+        assert bob(f"game/{g['id']}")["round"] == n + 1
+bob(f"game/{g['id']}/guess", {"lat": 48.857, "lng": 2.352}, expect=409)  # game over
+assert bob(f"game/{g['id']}")["total"] == 5000
+boss(f"game/{g['id']}", expect=404)  # can't see someone else's game
+
+# far guess scores low; London ~344 km away
+far = app.score_for(app.haversine_km(48.857, 2.352, 51.507, -0.128))
+assert 700 < far < 800, far
+
+# admin grants themselves cheats: peek + 2x multiplier
+users = {u["username"]: u for u in boss("admin/users")["users"]}
+assert users["bob"]["best"] == 5000 and users["bob"]["last_ip"] == "127.0.0.1"
+me_id = users["boss"]["id"]
+boss("admin/user", {"id": me_id, "action": "update", "fields": {"username": "boss", "is_admin": True, "cheat_reveal": True, "cheat_multiplier": 2}})
+boss("admin/user", {"id": me_id, "action": "update", "fields": {"username": "boss", "is_admin": False}}, expect=400)
+g2 = boss("game", {})
+assert boss(f"game/{g2['id']}/peek") == {"lat": 48.857, "lng": 2.352}
+assert boss(f"game/{g2['id']}/guess", {"lat": 48.857, "lng": 2.352})["score"] == 2000
+
+# admin controls bob's account
+bob_id = users["bob"]["id"]
+boss("admin/user", {"id": bob_id, "action": "update", "fields": {"username": "bob", "banned": True}})
+bob("me", expect=401)
+bob("login", {"username": "bob", "password": "secret1"}, expect=403)
+boss("admin/user", {"id": bob_id, "action": "update", "fields": {"username": "bobby"}})
+boss("admin/user", {"id": bob_id, "action": "password", "password": "newpass1"})
+bob("login", {"username": "bobby", "password": "newpass1"})
+boss("admin/user", {"id": bob_id, "action": "reset_stats"})
+assert next(u for u in boss("admin/users")["users"] if u["id"] == bob_id)["games"] == 0
+boss("admin/user", {"id": me_id, "action": "delete"}, expect=400)
+boss("admin/user", {"id": bob_id, "action": "delete"})
+bob("me", expect=401)
+
+# settings + closed sign-ups
+boss("admin/settings", {"mapillary_token": "t2", "registration_open": False})
+assert boss("admin/settings") == {"mapillary_token": "t2", "registration_open": False}
+client()("register", {"username": "eve", "password": "secret1"}, expect=403)
+print("all checks passed")

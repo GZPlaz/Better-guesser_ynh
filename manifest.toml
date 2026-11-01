@@ -1,0 +1,72 @@
+#:schema https://raw.githubusercontent.com/YunoHost/apps/main/schemas/manifest.v2.schema.json
+
+packaging_format = 2
+
+id = "betterguesser"
+name = "Better Guesser"
+description.en = "Self-hosted geography guessing game on real street-level imagery"
+description.fr = "Jeu de géographie auto-hébergé sur des images de rues réelles"
+
+version = "0.1~ynh1"
+
+maintainers = []
+
+[upstream]
+license = "MIT"
+code = "https://github.com/gzplaz/better-guesser"
+
+[integration]
+yunohost = ">= 12.0"
+helpers_version = "2.1"
+architectures = "all"
+multi_instance = true
+ldap = false
+sso = false
+disk = "20M"
+ram.build = "20M"
+ram.runtime = "40M"
+
+[install]
+    [install.domain]
+    type = "domain"
+
+    [install.path]
+    type = "path"
+    default = "/guesser"
+
+    [install.init_main_permission]
+    help.en = "Pick 'visitors' so friends without a YunoHost account can play (they create game accounts in the app)."
+    type = "group"
+    default = "visitors"
+
+    [install.admin_name]
+    ask.en = "Username of the game's admin account"
+    type = "string"
+    default = "admin"
+    pattern.regexp = "^[A-Za-z0-9_.-]{3,20}$"
+    pattern.error = "3-20 letters, digits, '.', '_' or '-'"
+
+    [install.admin_password]
+    ask.en = "Password of the game's admin account"
+    type = "password"
+
+    [install.mapillary_token]
+    ask.en = "Mapillary client access token"
+    help.en = "Free at https://www.mapillary.com/dashboard/developers (register an app, copy the 'Client Token'). You can also set it later in the admin panel."
+    type = "string"
+    optional = true
+
+[resources]
+    [resources.system_user]
+
+    [resources.install_dir]
+
+    [resources.data_dir]
+
+    [resources.permissions]
+    main.url = "/"
+
+    [resources.ports]
+
+    [resources.apt]
+    packages = "python3"

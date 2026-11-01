@@ -1,0 +1,22 @@
+#!/bin/bash
+
+source _common.sh
+source /usr/share/yunohost/helpers
+
+ynh_script_progression "Installing app code..."
+_install_app_code
+
+ynh_script_progression "Creating the database and admin account..."
+BG_DB="$data_dir/game.db" python3 "$install_dir/app.py" init "$admin_name" "${mapillary_token:-}" <<< "$admin_password"
+chown -R "$app:$app" "$data_dir"
+chmod 750 "$data_dir"
+
+ynh_script_progression "Adding system configurations..."
+ynh_config_add_nginx
+ynh_config_add_systemd
+yunohost service add "$app" --description="Better Guesser geography game"
+
+ynh_script_progression "Starting $app's systemd service..."
+ynh_systemctl --service="$app" --action="start" --log_path="systemd" --wait_until="Serving on"
+
+ynh_script_progression "Installation of $app completed"

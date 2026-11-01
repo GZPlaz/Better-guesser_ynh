@@ -1,0 +1,30 @@
+[Unit]
+Description=Better Guesser (__APP__)
+After=network.target
+
+[Service]
+Type=simple
+User=__APP__
+Group=__APP__
+WorkingDirectory=__INSTALL_DIR__/
+Environment=BG_PORT=__PORT__
+Environment=BG_DB=__DATA_DIR__/game.db
+ExecStart=/usr/bin/python3 __INSTALL_DIR__/app.py
+Restart=on-failure
+RestartSec=5
+
+# Sandboxing
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=__DATA_DIR__
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

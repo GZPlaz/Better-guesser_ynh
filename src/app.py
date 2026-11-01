@@ -1,0 +1,414 @@
+#!/usr/bin/env python3
+"""Better Guesser: a tiny self-hosted geography guessing game. Python stdlib only."""
+import hashlib, hmac, json, math, os, random, re, secrets, sqlite3, sys, time, traceback
+import urllib.error, urllib.parse, urllib.request
+from http.cookies import SimpleCookie
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+DB = os.environ.get("BG_DB", "game.db")
+PORT = int(os.environ.get("BG_PORT", "8095"))
+HERE = os.path.dirname(os.path.abspath(__file__))
+COOKIE = f"bg_session_{PORT}"  # per-instance, so two installs on one domain don't clash
+ROUNDS = 5
+SESSION_SECS = 30 * 86400
+USERNAME_RE = r"[A-Za-z0-9_.-]{3,20}"
+
+# Cities with decent Mapillary coverage; rounds land somewhere within ~10 km of one.
+SEEDS = [
+    (48.857, 2.352), (51.507, -0.128), (52.520, 13.405), (40.416, -3.704), (41.903, 12.496), (52.370, 4.895),
+    (50.850, 4.352), (48.208, 16.373), (50.075, 14.438), (52.230, 21.012), (47.498, 19.040), (59.329, 18.069),
+    (59.913, 10.752), (60.170, 24.938), (55.676, 12.568), (53.349, -6.260), (38.722, -9.139), (37.984, 23.728),
+    (44.427, 26.103), (42.698, 23.322), (45.815, 15.982), (46.056, 14.506), (54.687, 25.280), (56.950, 24.105),
+    (59.437, 24.754), (47.377, 8.541), (45.464, 9.190), (43.296, 5.370), (41.385, 2.173), (53.481, -2.242),
+    (55.953, -3.188), (64.146, -21.942), (40.713, -74.006), (34.052, -118.244), (41.878, -87.630), (29.760, -95.370),
+    (47.606, -122.332), (37.775, -122.419), (49.283, -123.121), (43.653, -79.383), (45.502, -73.567), (25.762, -80.192),
+    (39.739, -104.990), (19.433, -99.133), (20.659, -103.349), (4.711, -74.072), (-12.046, -77.043), (-33.449, -70.669),
+    (-34.604, -58.382), (-23.551, -46.633), (-22.907, -43.173), (-0.180, -78.468), (-33.869, 151.209), (-37.814, 144.963),
+    (-27.470, 153.026), (-31.953, 115.857), (-36.849, 174.763), (-41.287, 174.776), (35.690, 139.692), (34.694, 135.502),
+    (37.567, 126.978), (25.033, 121.565), (1.352, 103.820), (13.756, 100.502), (3.139, 101.687), (14.600, 120.984),
+    (-6.209, 106.846), (21.028, 105.834), (28.614, 77.209), (19.076, 72.878), (12.972, 77.595), (6.927, 79.861),
+    (-33.925, 18.424), (-26.204, 28.047), (-1.292, 36.822), (5.604, -0.187), (6.524, 3.379), (33.573, -7.590),
+    (30.044, 31.236), (41.008, 28.978), (32.085, 34.782), (25.205, 55.271), (43.238, 76.946), (41.716, 44.783),
+]
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL COLLATE NOCASE, pw TEXT NOT NULL,
+  is_admin INTEGER NOT NULL DEFAULT 0, banned INTEGER NOT NULL DEFAULT 0,
+  cheat_reveal INTEGER NOT NULL DEFAULT 0, cheat_multiplier REAL NOT NULL DEFAULT 1,
+  created REAL, last_login REAL, last_ip TEXT);
+CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires REAL);
+CREATE TABLE IF NOT EXISTS games(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  started REAL, total INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS rounds(game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE, n INTEGER NOT NULL,
+  image_id TEXT, lat REAL, lng REAL, guess_lat REAL, guess_lng REAL, distance REAL, score INTEGER, PRIMARY KEY(game_id, n));
+CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+"""
+
+
+class Err(Exception):
+    def __init__(self, code, msg):
+        super().__init__(msg)
+        self.code, self.msg = code, msg
+
+
+def db():
+    c = sqlite3.connect(DB, timeout=10)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA foreign_keys=ON")
+    return c
+
+
+def init_db():
+    with db() as c:
+        c.executescript(SCHEMA)
+        c.execute("INSERT OR IGNORE INTO settings VALUES('registration_open','1')")
+
+
+def setting(key, default=""):
+    row = db().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(key, value):
+    with db() as c:
+        c.execute("INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+
+def hash_pw(pw, salt=None):
+    salt = salt or secrets.token_hex(16)
+    return f"{salt}${hashlib.pbkdf2_hmac('sha256', pw.encode(), salt.encode(), 200_000).hex()}"
+
+
+def check_pw(pw, stored):
+    return hmac.compare_digest(hash_pw(pw, stored.split("$", 1)[0]), stored)
+
+
+def valid_username(name):
+    if not isinstance(name, str) or not re.fullmatch(USERNAME_RE, name):
+        raise Err(400, "Username must be 3-20 letters, digits, '.', '_' or '-'")
+    return name
+
+
+def valid_password(pw):
+    if not isinstance(pw, str) or not 6 <= len(pw) <= 200:
+        raise Err(400, "Password must be 6-200 characters")
+    return pw
+
+
+def haversine_km(lat1, lng1, lat2, lng2):
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    a = math.sin((p2 - p1) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lng2 - lng1) / 2) ** 2
+    return 2 * 6371 * math.asin(math.sqrt(a))
+
+
+def score_for(km):
+    return round(1000 * math.exp(-km / 1200))  # 1000 = spot on, ~430 at 1000 km, ~0 past 8000 km
+
+
+def pick_location(token):
+    """Return (image_id, lat, lng) of a random Mapillary image near a seed city."""
+    for _ in range(15):
+        lat, lng = random.choice(SEEDS)
+        lat, lng, d = lat + random.uniform(-0.1, 0.1), lng + random.uniform(-0.1, 0.1), 0.02
+        q = urllib.parse.urlencode({"access_token": token, "fields": "id,geometry,is_pano", "limit": 20,
+                                    "bbox": f"{lng - d},{lat - d},{lng + d},{lat + d}"})
+        try:
+            with urllib.request.urlopen(f"https://graph.mapillary.com/images?{q}", timeout=10) as r:
+                imgs = json.load(r).get("data", [])
+        except urllib.error.HTTPError as e:
+            if e.code in (400, 401, 403):
+                raise Err(502, f"Mapillary rejected the request (HTTP {e.code}) - check the token in the admin panel")
+            continue
+        except (OSError, ValueError):
+            continue
+        if imgs:
+            img = next((i for i in imgs if i.get("is_pano")), imgs[0])  # prefer 360° panoramas
+            g_lng, g_lat = img["geometry"]["coordinates"]
+            return img["id"], g_lat, g_lng
+    raise Err(502, "Could not find street imagery, try again")
+
+
+# ---------- API handlers: fn(handler, body, *url_groups) -> dict | (dict, set_cookie) ----------
+
+def new_session(h, uid):
+    tok = secrets.token_urlsafe(32)
+    now = time.time()
+    with db() as c:
+        c.execute("DELETE FROM sessions WHERE expires<?", (now,))
+        c.execute("INSERT INTO sessions VALUES(?,?,?)", (tok, uid, now + SESSION_SECS))
+        c.execute("UPDATE users SET last_login=?, last_ip=? WHERE id=?", (now, h.client_ip(), uid))
+    secure = "; Secure" if h.headers.get("X-Forwarded-Proto") == "https" else ""
+    return {"ok": True}, f"{COOKIE}={tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_SECS}{secure}"
+
+
+def api_register(h, b):
+    if setting("registration_open") != "1":
+        raise Err(403, "Sign-ups are closed")
+    name, pw = valid_username(b.get("username")), valid_password(b.get("password"))
+    try:
+        with db() as c:
+            uid = c.execute("INSERT INTO users(username,pw,created) VALUES(?,?,?)", (name, hash_pw(pw), time.time())).lastrowid
+    except sqlite3.IntegrityError:
+        raise Err(409, "Username taken")
+    return new_session(h, uid)
+
+
+def api_login(h, b):
+    u = db().execute("SELECT * FROM users WHERE username=?", (str(b.get("username")),)).fetchone()
+    if not u or not check_pw(str(b.get("password")), u["pw"]):
+        raise Err(401, "Wrong username or password")
+    if u["banned"]:
+        raise Err(403, "This account is banned")
+    return new_session(h, u["id"])
+
+
+def api_logout(h, b):
+    with db() as c:
+        c.execute("DELETE FROM sessions WHERE token=?", (h.token(),))
+    return {"ok": True}, f"{COOKIE}=; Path=/; Max-Age=0"
+
+
+def api_me(h, b):
+    u = h.user()
+    return {"username": u["username"], "is_admin": bool(u["is_admin"]), "cheat_reveal": bool(u["cheat_reveal"])}
+
+
+def game_state(u, gid):
+    c = db()
+    g = c.execute("SELECT * FROM games WHERE id=? AND user_id=?", (gid, u["id"])).fetchone()
+    if not g:
+        raise Err(404, "No such game")
+    played = c.execute("SELECT n, score, distance FROM rounds WHERE game_id=? AND score IS NOT NULL ORDER BY n", (gid,)).fetchall()
+    state = {"id": g["id"], "rounds": ROUNDS, "total": g["total"], "done": bool(g["done"]),
+             "history": [dict(r) for r in played], "token": setting("mapillary_token")}
+    if g["done"]:
+        return state
+    n = len(played) + 1
+    cur = c.execute("SELECT image_id FROM rounds WHERE game_id=? AND n=?", (gid, n)).fetchone()
+    if not cur:
+        image_id, lat, lng = pick_location(state["token"])  # network call, outside any transaction
+        with c:
+            c.execute("INSERT OR IGNORE INTO rounds(game_id,n,image_id,lat,lng) VALUES(?,?,?,?,?)", (gid, n, image_id, lat, lng))
+        cur = c.execute("SELECT image_id FROM rounds WHERE game_id=? AND n=?", (gid, n)).fetchone()
+    return {**state, "round": n, "image_id": cur["image_id"]}
+
+
+def api_new_game(h, b):
+    u = h.user()
+    if not setting("mapillary_token"):
+        raise Err(503, "The admin has not set a Mapillary token yet")
+    with db() as c:
+        gid = c.execute("INSERT INTO games(user_id, started) VALUES(?,?)", (u["id"], time.time())).lastrowid
+    return game_state(u, gid)
+
+
+def api_game(h, b, gid):
+    return game_state(h.user(), int(gid))
+
+
+def open_round(u, gid):
+    r = db().execute("SELECT r.* FROM rounds r JOIN games g ON g.id=r.game_id WHERE g.id=? AND g.user_id=? AND r.score IS NULL",
+                     (int(gid), u["id"])).fetchone()
+    if not r:
+        raise Err(409, "No open round")
+    return r
+
+
+def api_guess(h, b, gid):
+    u = h.user()
+    lat, lng = float(b["lat"]), float(b["lng"])
+    if not (-90 <= lat <= 90 and math.isfinite(lng)):
+        raise Err(400, "Bad coordinates")
+    lng = (lng + 180) % 360 - 180  # the map wraps around the world
+    r = open_round(u, gid)
+    km = haversine_km(lat, lng, r["lat"], r["lng"])
+    s = round(score_for(km) * u["cheat_multiplier"])
+    done = r["n"] >= ROUNDS
+    with db() as c:
+        if c.execute("UPDATE rounds SET guess_lat=?, guess_lng=?, distance=?, score=? WHERE game_id=? AND n=? AND score IS NULL",
+                     (lat, lng, km, s, r["game_id"], r["n"])).rowcount != 1:
+            raise Err(409, "Already guessed")
+        c.execute("UPDATE games SET total=total+?, done=? WHERE id=?", (s, int(done), r["game_id"]))
+        total = c.execute("SELECT total FROM games WHERE id=?", (r["game_id"],)).fetchone()["total"]
+    return {"distance_km": km, "score": s, "total": total, "done": done,
+            "answer": {"lat": r["lat"], "lng": r["lng"]}, "guess": {"lat": lat, "lng": lng}}
+
+
+def api_peek(h, b, gid):
+    u = h.user()
+    if not u["cheat_reveal"]:
+        raise Err(403, "Nice try")
+    r = open_round(u, gid)
+    return {"lat": r["lat"], "lng": r["lng"]}
+
+
+def api_leaderboard(h, b):
+    h.user()
+    rows = db().execute("""SELECT u.username, COUNT(g.id) games, COALESCE(MAX(g.total),0) best, COALESCE(SUM(g.total),0) points
+        FROM users u LEFT JOIN games g ON g.user_id=u.id AND g.done=1 WHERE u.banned=0
+        GROUP BY u.id ORDER BY best DESC, points DESC LIMIT 50""").fetchall()
+    return {"rows": [dict(r) for r in rows]}
+
+
+def api_admin_users(h, b):
+    h.user(admin=True)
+    rows = db().execute("""SELECT u.id, u.username, u.is_admin, u.banned, u.cheat_reveal, u.cheat_multiplier,
+        u.created, u.last_login, u.last_ip, COUNT(g.id) games, SUM(g.done) finished,
+        COALESCE(MAX(CASE WHEN g.done THEN g.total END),0) best, COALESCE(SUM(g.total),0) points,
+        (SELECT COUNT(*) FROM sessions s WHERE s.user_id=u.id AND s.expires>?) sessions
+        FROM users u LEFT JOIN games g ON g.user_id=u.id GROUP BY u.id ORDER BY u.id""", (time.time(),)).fetchall()
+    return {"users": [dict(r) for r in rows]}
+
+
+def api_admin_user(h, b):
+    me = h.user(admin=True)
+    uid, action = int(b["id"]), b.get("action")
+    if not db().execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
+        raise Err(404, "No such user")
+    self_edit = uid == me["id"]
+    with db() as c:
+        if action == "delete":
+            if self_edit:
+                raise Err(400, "You can't delete yourself")
+            c.execute("DELETE FROM users WHERE id=?", (uid,))
+        elif action == "reset_stats":
+            c.execute("DELETE FROM games WHERE user_id=?", (uid,))
+        elif action == "logout":
+            c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+        elif action == "password":
+            c.execute("UPDATE users SET pw=? WHERE id=?", (hash_pw(valid_password(b.get("password"))), uid))
+            if not self_edit:
+                c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+        elif action == "update":
+            f = b["fields"]
+            if self_edit and (not f.get("is_admin", True) or f.get("banned")):
+                raise Err(400, "You can't demote or ban yourself")
+            mult = float(f.get("cheat_multiplier", 1))
+            if not 0 <= mult <= 100:
+                raise Err(400, "Multiplier must be between 0 and 100")
+            try:
+                c.execute("UPDATE users SET username=?, is_admin=?, banned=?, cheat_reveal=?, cheat_multiplier=? WHERE id=?",
+                          (valid_username(f["username"]), int(bool(f.get("is_admin"))), int(bool(f.get("banned"))),
+                           int(bool(f.get("cheat_reveal"))), mult, uid))
+            except sqlite3.IntegrityError:
+                raise Err(409, "Username taken")
+            if f.get("banned"):
+                c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+        else:
+            raise Err(400, "Unknown action")
+    return {"ok": True}
+
+
+def api_admin_settings(h, b):
+    h.user(admin=True)
+    if h.command == "POST":
+        set_setting("mapillary_token", str(b.get("mapillary_token", "")).strip())
+        set_setting("registration_open", "1" if b.get("registration_open") else "0")
+    return {"mapillary_token": setting("mapillary_token"), "registration_open": setting("registration_open") == "1"}
+
+
+ROUTES = [
+    ("POST", r"/api/register", api_register),
+    ("POST", r"/api/login", api_login),
+    ("POST", r"/api/logout", api_logout),
+    ("GET", r"/api/me", api_me),
+    ("GET", r"/api/leaderboard", api_leaderboard),
+    ("POST", r"/api/game", api_new_game),
+    ("GET", r"/api/game/(\d+)", api_game),
+    ("POST", r"/api/game/(\d+)/guess", api_guess),
+    ("GET", r"/api/game/(\d+)/peek", api_peek),
+    ("GET", r"/api/admin/users", api_admin_users),
+    ("POST", r"/api/admin/user", api_admin_user),
+    ("GET", r"/api/admin/settings", api_admin_settings),
+    ("POST", r"/api/admin/settings", api_admin_settings),
+]
+
+
+class Handler(BaseHTTPRequestHandler):
+    def client_ip(self):
+        return self.headers.get("X-Real-IP") or self.client_address[0]  # set by the YunoHost nginx proxy
+
+    def token(self):
+        m = SimpleCookie(self.headers.get("Cookie", "")).get(COOKIE)
+        return m.value if m else ""
+
+    def user(self, admin=False):
+        u = db().execute("SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires>?",
+                         (self.token(), time.time())).fetchone()
+        if not u or u["banned"]:
+            raise Err(401, "Please log in")
+        if admin and not u["is_admin"]:
+            raise Err(403, "Admins only")
+        return u
+
+    def send(self, code, body, ctype="application/json", cookie=None):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        self.route()
+
+    def do_POST(self):
+        self.route()
+
+    def route(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if self.command == "GET" and path in ("/", "/index.html"):
+            with open(os.path.join(HERE, "index.html"), "rb") as f:
+                return self.send(200, f.read(), "text/html; charset=utf-8")
+        for method, pattern, fn in ROUTES:
+            m = re.fullmatch(pattern, path)
+            if method != self.command or not m:
+                continue
+            try:
+                body = {}
+                if self.command == "POST":
+                    # JSON-only POSTs + SameSite cookie = no cross-site form CSRF
+                    if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
+                        raise Err(415, "JSON required")
+                    n = int(self.headers.get("Content-Length") or 0)
+                    if n > 10_000:
+                        raise Err(413, "Too large")
+                    body = json.loads(self.rfile.read(n) or b"{}")
+                    if not isinstance(body, dict):
+                        raise Err(400, "Bad request")
+                res, cookie = fn(self, body, *m.groups()), None
+                if isinstance(res, tuple):
+                    res, cookie = res
+                return self.send(200, json.dumps(res).encode(), cookie=cookie)
+            except Err as e:
+                return self.send(e.code, json.dumps({"error": e.msg}).encode())
+            except (KeyError, TypeError, ValueError):
+                return self.send(400, json.dumps({"error": "Bad request"}).encode())
+            except Exception:
+                traceback.print_exc()
+                return self.send(500, json.dumps({"error": "Server error"}).encode())
+        self.send(404, json.dumps({"error": "Not found"}).encode())
+
+
+def cli_init(admin_name, token=""):
+    """Create/refresh the admin account (password read from stdin). Used by the YunoHost install script."""
+    init_db()
+    pw = valid_password(sys.stdin.readline().rstrip("\n"))
+    with db() as c:
+        c.execute("""INSERT INTO users(username,pw,is_admin,created) VALUES(?,?,1,?)
+                     ON CONFLICT(username) DO UPDATE SET pw=excluded.pw, is_admin=1, banned=0""",
+                  (valid_username(admin_name), hash_pw(pw), time.time()))
+    if token:
+        set_setting("mapillary_token", token)
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["init"]:
+        cli_init(*sys.argv[2:4])
+        sys.exit()
+    init_db()
+    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    print(f"Serving on 127.0.0.1:{PORT}", flush=True)
+    srv.serve_forever()

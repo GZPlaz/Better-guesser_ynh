@@ -1,0 +1,22 @@
+#!/bin/bash
+
+source ../settings/scripts/_common.sh
+source /usr/share/yunohost/helpers
+
+ynh_script_progression "Restoring the app files and database..."
+ynh_restore "$install_dir"
+ynh_restore "$data_dir"
+chown -R "$app:www-data" "$install_dir"
+chown -R "$app:$app" "$data_dir"
+
+ynh_script_progression "Restoring system configurations..."
+ynh_restore "/etc/nginx/conf.d/$domain.d/$app.conf"
+ynh_restore "/etc/systemd/system/$app.service"
+systemctl enable "$app.service" --quiet
+yunohost service add "$app" --description="Better Guesser geography game"
+
+ynh_script_progression "Starting $app's systemd service..."
+ynh_systemctl --service="$app" --action="start" --log_path="systemd" --wait_until="Serving on"
+ynh_systemctl --service="nginx" --action="reload"
+
+ynh_script_progression "Restoration completed for $app"
