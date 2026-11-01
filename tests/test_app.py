@@ -73,7 +73,7 @@ bob_id = users["bob"]["id"]
 boss("admin/user", {"id": bob_id, "action": "update", "fields": {"username": "bob", "banned": True}})
 bob("me", expect=401)
 bob("login", {"username": "bob", "password": "secret1"}, expect=403)
-boss("admin/user", {"id": bob_id, "action": "update", "fields": {"username": "bobby"}})
+boss("admin/user", {"id": bob_id, "action": "update", "fields": {"username": "bobby", "banned": False}})
 boss("admin/user", {"id": bob_id, "action": "password", "password": "newpass1"})
 bob("login", {"username": "bobby", "password": "newpass1"})
 boss("admin/user", {"id": bob_id, "action": "reset_stats"})
@@ -88,16 +88,17 @@ for n, cl in players.items():
     cl("register", {"username": n, "password": "secret1"})
 ann, ben, cat, dan = players.values()
 
-# free-for-all: same locations for everyone, separate scores
-ffa = ann("lobby", {"mode": "ffa"})
+# 1v1: same locations for both, separate scores, max 2 players
+ann("lobby", {"mode": "ffa"}, expect=400)
+ffa = ann("lobby", {"mode": "1v1"})
 code = ffa["code"]
 ben(f"lobby/{code}", expect=403)  # not a member yet
 ann(f"lobby/{code}/start", {}, expect=409)  # alone
 ben("lobby/join", {"code": code.lower()})
 ben(f"lobby/{code}/start", {}, expect=403)  # not host
 ben(f"lobby/{code}/play", {}, expect=409)  # not started
+cat("lobby/join", {"code": code}, expect=409)  # full
 ann(f"lobby/{code}/start", {})
-cat("lobby/join", {"code": code}, expect=409)  # too late
 ga, gb = ann(f"lobby/{code}/play", {}), ben(f"lobby/{code}/play", {})
 assert ann(f"lobby/{code}/play", {})["id"] == ga["id"]  # one game per player per lobby
 for n in range(1, 6):
@@ -129,11 +130,61 @@ for cl, lat, lng in ((ann, 48.857, 2.352), (ben, 48.857, 2.352), (cat, 51.507, -
 st = dan(f"lobby/{code}")
 assert st["finished"] and st["teams"]["A"] == 10000 and st["teams"]["B"] == 2 * 5 * far, st
 
+# ---- ranked ----
+ids = {u["username"]: u["id"] for u in boss("admin/users")["users"]}
+assert ben("me")["rank"] == "Bronze" and ben("me")["next_rank_at"] == 100
+
+
+def ranked_match(p1, p2, p1_wins=True):
+    c1 = p1("ranked", {})["code"]
+    g1 = p1(f"lobby/{c1}/play", {})
+    assert p1("ranked", {})["code"] == c1  # resumes the unfinished match instead of queueing again
+    for _ in range(5):
+        p1(f"game/{g1['id']}/guess", {"lat": 48.857, "lng": 2.352} if p1_wins else {"lat": 0, "lng": 0})
+        g1 = p1(f"game/{g1['id']}")
+    st = p1(f"lobby/{c1}")
+    assert not st["finished"] and len(st["members"]) == 1  # waiting for an opponent
+    c2 = p2("ranked", {})["code"]
+    assert c2 == c1, "matchmaking should pair p2 with p1's open match"
+    g2 = p2(f"lobby/{c2}/play", {})
+    for _ in range(5):
+        p2(f"game/{g2['id']}/guess", {"lat": 51.507, "lng": -0.128})
+        g2 = p2(f"game/{g2['id']}")
+    return p1(f"lobby/{c1}")
+
+
+st = ranked_match(ben, cat)
+assert st["finished"] and {m["username"]: m["delta"] for m in st["members"]} == {"ben": 25, "cat": 0}, st  # cat had 0 RP, can't drop
+assert ben("me")["rank_points"] == 25
+ben("lobby/join", {"code": st["code"]}, expect=403)  # ranked lobbies are matchmaking-only
+st = ranked_match(cat, ben, p1_wins=False)
+assert ben("me")["rank_points"] == 50 and cat("me")["rank_points"] == 0
+
+# Legend Division: gated on the top rank, then MMR via Elo, public leaderboard
+ben("legend/enter", {}, expect=403)
+boss("admin/user", {"id": ids["ben"], "action": "update", "fields": {"rank_points": 499}})
+assert ben("me")["rank"] == "Diamond" and not ben("me")["legend_eligible"]
+boss("admin/user", {"id": ids["cat"], "action": "update", "fields": {"rank_points": 480}})
+ranked_match(ben, cat)
+me = ben("me")
+assert me["rank"] == "Master" and me["legend_eligible"] and not me["legend"]
+ben("legend/enter", {})
+assert ben("me")["legend"] and ben("me")["mmr"] == 1500
+boss("admin/user", {"id": ids["dan"], "action": "update", "fields": {"legend": True}})
+st = ranked_match(ben, dan)  # both legends now -> legend queue, Elo
+assert st["mode"] == "legend" and {m["username"]: m["delta"] for m in st["members"]} == {"ben": 16, "dan": -16}, st
+assert ben("me")["rank_points"] == 524  # RP frozen in legend
+rows = client()("legends")["rows"]  # no login needed
+assert [(r["username"], r["mmr"], r["matches"]) for r in rows] == [("ben", 1516, 1), ("dan", 1484, 1)], rows
+cat("ranked", {})  # non-legend queue never pairs with legends
+assert len(cat(f"lobby/{cat('ranked', {})['code']}")["members"]) == 1
+
 # deleting a host removes their lobbies but keeps other players' games
-ann_id = next(u["id"] for u in boss("admin/users")["users"] if u["username"] == "ann")
-boss("admin/user", {"id": ann_id, "action": "delete"})
+ben_games = lambda: next(u for u in boss("admin/users")["users"] if u["username"] == "ben")["games"]  # noqa: E731
+before = ben_games()
+boss("admin/user", {"id": ids["ann"], "action": "delete"})
 ben(f"lobby/{code}", expect=404)
-assert next(u for u in boss("admin/users")["users"] if u["username"] == "ben")["games"] == 2
+assert ben_games() == before
 
 # settings + closed sign-ups
 boss("admin/settings", {"mapillary_token": "t2", "registration_open": False})

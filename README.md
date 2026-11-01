@@ -14,19 +14,25 @@ The install asks for:
 
 Leave the access permission on `visitors` so friends can sign up in the game itself, without YunoHost accounts.
 
-## Lobbies (free-for-all and 2v2)
+## Game modes
 
-From the home page, anyone can create a lobby and share its 6-letter code. Friends join with that code.
-- **Free-for-all**: 2 to 20 players.
-- **2v2**: exactly 2 players per team. New joiners go to the emptier team, and players can switch teams until the game starts.
+- **🏆 Ranked 1v1**: press *Find ranked match* to be paired with the player whose rank is closest to yours. You both play the same 5 places, and the higher total wins.
+  - Win: +25 RP. Loss: -20 RP (you can't go below 0). Draw: no change.
+  - Ranks: Bronze (0), Silver (100), Gold (200), Platinum (300), Diamond (400), **Master (500)**.
+  - Matches are asynchronous, so you never wait in a queue: you play straight away, and the next player who queues plays your 5 places against you.
+- **👑 Legend Division**: once you reach Master, an *Enter Legend Division* button appears. Legends are only matched with other legends and get an **MMR** instead of RP: it starts at 1500 and changes by Elo with K=32. There is a **public Legend leaderboard** with every legend and their MMR, shown on the home page and on the login page, so it's visible without an account.
+- **⚔️ 1v1**: a private lobby. Send the 6-letter code to one friend. Doesn't affect rank.
+- **👥 2v2**: a private lobby with 2 players per team. A team's score is the sum of both players' scores. New joiners go to the emptier team, and players can switch until the host starts. Doesn't affect rank.
+- **Practice solo**: plays 5 rounds by yourself.
 
-Once the host presses **Start**, everyone plays the **same 5 locations** at their own pace. The lobby page updates the scores live, and in 2v2 a team's score is the sum of both players' scores. Lobby games also count toward the global leaderboard, and cheats work in them too.
+All modes count toward the *Best games* board, and cheats work everywhere, including ranked.
 
 ## Admin panel
 
 Log in as the admin and click **Admin**. For every account you get:
 - created date, last login, last IP, active sessions, games, best score and total points
 - rename, ban, kick (log out), set password, reset stats, delete, make admin
+- edit RP, put someone in or take them out of Legend Division, and edit MMR
 
 There are also two per-account cheats:
 - **Peek cheat**: a 👁 button appears next to *Guess*. Clicking it drops a small pink dot on the map at the real location.

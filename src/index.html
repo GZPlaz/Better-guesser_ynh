@@ -20,7 +20,9 @@
   input { background:#0c1017; color:var(--fg); border:1px solid #3a4558; border-radius:6px; padding:8px; }
   main > section { display:none; } main > section.on { display:block; }
   .card { background:var(--card); border-radius:10px; padding:20px; max-width:900px; margin:24px auto; }
-  .msg { color:var(--bad); min-height:1.4em; }
+  .msg { color:var(--bad); min-height:1.4em; } a { color:var(--acc); }
+  .modes { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:12px; }
+  .mode { background:#0c1017; border-radius:8px; padding:14px; } .mode h3 { margin:0 0 8px; } .hint { color:var(--mute); font-size:13px; }
   table { width:100%; border-collapse:collapse; } th, td { padding:6px 8px; text-align:left; border-bottom:1px solid #2a3344; }
   th { color:var(--mute); font-weight:500; } td.num { text-align:right; }
   #v-game { position:relative; height:calc(100vh - 52px); }
@@ -47,19 +49,29 @@
       <div style="display:flex;gap:8px"><button>Log in</button><button type="button" class="ghost" id="signup">Sign up</button></div>
       <div class="msg" id="authmsg"></div>
     </form>
-  </div></section>
+  </div>
+  <div class="card" style="max-width:520px"><h2>👑 Legend Division</h2><table><thead><tr><th>#</th><th>Legend</th><th class="num">MMR</th><th class="num">Matches</th></tr></thead><tbody class="legends"></tbody></table></div></section>
 
   <section id="v-home"><div class="card">
     <p>You get dropped somewhere on Earth. Look around, then pin where you think you are. 5 rounds, up to 1000 points each.</p>
-    <button id="play">▶ Play solo</button> <span class="msg" id="homemsg"></span>
-    <h2>Play with friends</h2>
-    <p style="color:var(--mute)">Make a lobby, send your friends the code. Everyone gets the same 5 places; play whenever you like and compare scores.</p>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <button class="ghost" data-mode="ffa">+ Free-for-all lobby</button><button class="ghost" data-mode="2v2">+ 2v2 lobby</button>
-      <form id="joinform" style="display:flex;gap:6px"><input id="joincode" placeholder="Lobby code" maxlength="6" size="9" aria-label="Lobby code"><button>Join</button></form>
+    <div class="modes">
+      <div class="mode"><h3>🏆 Ranked 1v1</h3><p id="rankline"></p>
+        <button id="ranked">Find ranked match</button> <button id="legend-enter" class="ghost" hidden>👑 Enter Legend Division</button>
+        <p class="hint">Get matched with a player near your rank. You both play the same 5 places, and the higher total wins.</p></div>
+      <div class="mode"><h3>⚔️ 1v1</h3><button class="ghost" data-mode="1v1">+ Create 1v1 lobby</button>
+        <p class="hint">Play a friend: send them the code.</p></div>
+      <div class="mode"><h3>👥 2v2</h3><button class="ghost" data-mode="2v2">+ Create 2v2 lobby</button>
+        <p class="hint">Two teams of two. A team's score is the sum of both players' scores.</p></div>
     </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px">
+      <form id="joinform" style="display:flex;gap:6px"><input id="joincode" placeholder="Lobby code" maxlength="6" size="9" aria-label="Lobby code"><button>Join lobby</button></form>
+      <button id="play" class="ghost">Practice solo</button> <span class="msg" id="homemsg"></span>
+    </div>
+    <h2>Your matches</h2>
     <ul id="mylobbies"></ul>
-    <h2>Leaderboard</h2>
+    <h2>👑 Legend Division</h2>
+    <table><thead><tr><th>#</th><th>Legend</th><th class="num">MMR</th><th class="num">Matches</th></tr></thead><tbody class="legends"></tbody></table>
+    <h2>Best games</h2>
     <table><thead><tr><th>#</th><th>Player</th><th class="num">Best game</th><th class="num">Games</th><th class="num">All-time points</th></tr></thead><tbody id="lb"></tbody></table>
   </div></section>
 
@@ -91,7 +103,7 @@
       <div class="scroll"><table id="admin-table"><thead><tr>
         <th>ID</th><th>Username</th><th>Created</th><th>Last login</th><th>Last IP</th><th class="num">Sessions</th>
         <th class="num">Games</th><th class="num">Best</th><th class="num">Points</th>
-        <th>Admin</th><th>Banned</th><th title="Can peek at the answer">Peek cheat</th><th title="Score multiplier">× Score</th><th></th>
+        <th>Admin</th><th>Banned</th><th title="Can peek at the answer">Peek cheat</th><th title="Score multiplier">× Score</th><th>RP</th><th>Legend</th><th>MMR</th><th></th>
       </tr></thead><tbody></tbody></table></div>
       <div class="msg" id="adminmsg"></div>
       <h2>Settings</h2>
@@ -108,6 +120,9 @@
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 const when = t => t ? new Date(t * 1000).toLocaleString() : '—';
+const MODES = { ffa: 'free-for-all', '1v1': '1v1', '2v2': '2v2', ranked: 'Ranked 1v1', legend: 'Legend 1v1' };
+const ranked = m => m === 'ranked' || m === 'legend';
+const signed = (d, unit) => d == null ? '' : ` (${d > 0 ? '+' : ''}${d} ${unit})`;
 let me = null, game = null, lobbyCode = null, lobbyTimer = null, viewer = null, gmap = null, rmap = null, guessMarker = null, peekMarker = null, rLayer = null;
 
 async function api(path, body) {
@@ -138,7 +153,7 @@ $('#nav').onclick = async e => {
 async function start() {
   try { me = await api('me'); } catch { me = null; }
   nav();
-  me ? home() : show('v-auth');
+  me ? home() : (show('v-auth'), legends());
 }
 
 // ---------- auth ----------
@@ -151,11 +166,25 @@ $('#authform').onsubmit = e => { e.preventDefault(); auth('login'); };
 $('#signup').onclick = () => auth('register');
 
 // ---------- home ----------
+async function legends() {
+  const { rows } = await api('legends');
+  document.querySelectorAll('.legends').forEach(t => t.innerHTML = rows.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.username)}</td>` +
+    `<td class="num">${r.mmr}</td><td class="num">${r.matches}</td></tr>`).join('') || '<tr><td colspan="4">Nobody has reached Legend Division yet.</td></tr>');
+}
+
 async function home() {
   show('v-home');
+  me = await api('me');
+  $('#rankline').innerHTML = me.legend ? `<b>👑 Legend</b> · ${me.mmr} MMR`
+    : `<b>${me.rank}</b> · ${me.rank_points} RP` + (me.next_rank_at ? ` <span class="hint">(${me.next_rank_at - me.rank_points} RP to the next rank)</span>` : '');
+  $('#ranked').textContent = me.legend ? 'Find Legend match' : 'Find ranked match';
+  $('#legend-enter').hidden = !me.legend_eligible || me.legend;
+  legends();
   const { rows } = await api('leaderboard');
   api('lobbies').then(({ lobbies }) => $('#mylobbies').innerHTML = lobbies.map(l =>
-    `<li><a href="#" data-code="${l.code}">${l.code}</a> · ${l.mode === '2v2' ? '2v2' : 'free-for-all'} · host ${esc(l.host)} · ${l.players} players${l.started ? '' : ' · waiting'}</li>`).join(''));
+    `<li><a href="#" data-code="${l.code}">${l.code}</a> · ${MODES[l.mode]} · ` + (ranked(l.mode)
+      ? (l.settled ? `done${signed(l.delta, l.mode === 'legend' ? 'MMR' : 'RP')}` : l.players < 2 ? 'waiting for an opponent' : 'in progress')
+      : `host ${esc(l.host)} · ${l.players} players${l.started ? '' : ' · waiting'}`) + '</li>').join('') || '<li class="hint">No matches yet.</li>');
   $('#lb').innerHTML = rows.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.username)}</td><td class="num">${r.best}</td>` +
     `<td class="num">${r.games}</td><td class="num">${r.points}</td></tr>`).join('');
 }
@@ -167,6 +196,19 @@ $('#play').onclick = async () => {
 };
 
 // ---------- lobbies ----------
+$('#ranked').onclick = async () => {
+  $('#ranked').disabled = true; $('#homemsg').textContent = 'Finding a match…';
+  try {
+    lobbyCode = (await api('ranked', {})).code;
+    game = await api(`lobby/${lobbyCode}/play`, {});
+    $('#homemsg').textContent = '';
+    game.done ? lobby(lobbyCode) : round();
+  } catch (e) { $('#homemsg').textContent = e.message; }
+  $('#ranked').disabled = false;
+};
+$('#legend-enter').onclick = async () => {
+  try { await api('legend/enter', {}); home(); } catch (e) { $('#homemsg').textContent = e.message; }
+};
 document.querySelectorAll('[data-mode]').forEach(b => b.onclick = async () => {
   try { lobby((await api('lobby', { mode: b.dataset.mode })).code); } catch (e) { $('#homemsg').textContent = e.message; }
 });
@@ -184,15 +226,18 @@ async function lobby(code) {
 async function paintLobby() {
   let l;
   try { l = await api('lobby/' + lobbyCode); } catch (e) { $('#l-msg').textContent = e.message; return; }
-  const duo = l.mode === '2v2';
-  $('#l-code').textContent = l.code; $('#l-mode').textContent = duo ? '2v2' : 'free-for-all';
+  const duo = l.mode === '2v2', unit = l.mode === 'legend' ? 'MMR' : 'RP';
+  $('#l-code').textContent = l.code; $('#l-mode').textContent = MODES[l.mode];
   const best = Math.max(...Object.values(l.teams));
   $('#l-teams').innerHTML = !duo ? '' : ['A', 'B'].map(t => `<div class="card" style="margin:0;flex:1;padding:12px">
     <b>Team ${t}</b> ${l.finished && l.teams[t] === best ? '🏆' : ''}<br><span style="font-size:24px">${l.teams[t] ?? 0}</span><br>
     ${!l.started && l.my_team !== t ? `<button class="ghost" data-team="${t}">Switch to ${t}</button>` : ''}</div>`).join('');
-  $('#l-members').innerHTML = l.members.map((m, i) => `<tr><td>${l.finished && !duo && i === 0 ? '🏆 ' : ''}${esc(m.username)}${m.host ? ' (host)' : ''}</td>
-    <td>${m.team ?? '—'}</td><td class="num">${m.played}/${l.rounds}</td><td class="num">${m.total}</td></tr>`).join('');
-  $('#l-info').textContent = l.finished ? 'Everyone is done. Final results:' : l.started ? 'Started: play your 5 rounds, scores update live.'
+  $('#l-members').innerHTML = l.members.map((m, i) => `<tr><td>${l.finished && !duo && i === 0 && m.total > (l.members[1]?.total ?? -1) ? '🏆 ' : ''}${esc(m.username)}${m.host && !ranked(l.mode) ? ' (host)' : ''}</td>
+    <td>${m.team ?? '—'}</td><td class="num">${m.played}/${l.rounds}</td><td class="num">${m.total}${signed(m.delta, unit)}</td></tr>`).join('');
+  const mine = l.members.find(m => m.username === me.username);
+  $('#l-info').textContent = ranked(l.mode) && l.finished ? (mine.delta > 0 ? '🏆 Victory!' : mine.delta < 0 ? 'Defeat.' : 'Match over.')
+    : ranked(l.mode) && l.members.length < 2 ? 'Waiting for an opponent to play the same 5 places. You can leave this page; the result shows up under Your matches.'
+    : l.finished ? 'Everyone is done. Final results:' : l.started ? 'Started: play your 5 rounds, scores update live.'
     : l.is_host ? `Share the code ${l.code} with your friends, then press Start.${duo ? ' You need 2 players on each team.' : ''}`
     : 'Waiting for the host to start…';
   $('#l-start').hidden = !l.is_host || l.started;
@@ -287,6 +332,8 @@ async function admin() {
     <td class="num">${u.finished || 0}/${u.games}</td><td class="num">${u.best}</td><td class="num">${u.points}</td>
     <td>${box('is_admin', u.is_admin)}</td><td>${box('banned', u.banned)}</td><td>${box('cheat_reveal', u.cheat_reveal)}</td>
     <td><input type="number" data-f="cheat_multiplier" value="${u.cheat_multiplier}" min="0" max="100" step="0.1"></td>
+    <td><input type="number" data-f="rank_points" value="${u.rank_points}" min="0" step="1"></td><td>${box('legend', u.legend)}</td>
+    <td><input type="number" data-f="mmr" value="${u.mmr}" min="0" step="1"></td>
     <td class="actions"><button data-act="update">Save</button><button class="ghost" data-act="password">Set password</button>
       <button class="ghost" data-act="logout">Kick</button><button class="ghost" data-act="reset_stats">Reset stats</button>
       <button class="bad" data-act="delete">Delete</button></td></tr>`).join('');

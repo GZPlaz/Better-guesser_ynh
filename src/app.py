@@ -12,6 +12,9 @@ COOKIE = f"bg_session_{PORT}"  # per-instance, so two installs on one domain don
 ROUNDS = 5
 SESSION_SECS = 30 * 86400
 USERNAME_RE = r"[A-Za-z0-9_.-]{3,20}"
+RANKS = [(0, "Bronze"), (100, "Silver"), (200, "Gold"), (300, "Platinum"), (400, "Diamond"), (500, "Master")]
+LEGEND_RP = RANKS[-1][0]  # reaching the top rank unlocks Legend Division
+WIN_RP, LOSS_RP, START_MMR, ELO_K = 25, 20, 1500, 32
 
 # Cities with decent Mapillary coverage; rounds land somewhere within ~10 km of one.
 SEEDS = [
@@ -49,6 +52,14 @@ CREATE TABLE IF NOT EXISTS lobby_members(lobby_id INTEGER NOT NULL REFERENCES lo
 CREATE TABLE IF NOT EXISTS lobby_rounds(lobby_id INTEGER NOT NULL REFERENCES lobbies(id) ON DELETE CASCADE, n INTEGER NOT NULL,
   image_id TEXT, lat REAL, lng REAL, PRIMARY KEY(lobby_id, n));
 """
+MIGRATIONS = [
+    ("games", "lobby_id", "INTEGER REFERENCES lobbies(id) ON DELETE SET NULL"),  # v0.2
+    ("users", "rank_points", "INTEGER NOT NULL DEFAULT 0"),  # v0.3
+    ("users", "legend", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "mmr", f"REAL NOT NULL DEFAULT {START_MMR}"),
+    ("lobbies", "settled", "INTEGER NOT NULL DEFAULT 0"),
+    ("lobby_members", "delta", "REAL"),
+]
 
 
 class Err(Exception):
@@ -67,8 +78,9 @@ def db():
 def init_db():
     with db() as c:
         c.executescript(SCHEMA)
-        if "lobby_id" not in [r["name"] for r in c.execute("PRAGMA table_info(games)")]:  # v0.1 databases
-            c.execute("ALTER TABLE games ADD COLUMN lobby_id INTEGER REFERENCES lobbies(id) ON DELETE SET NULL")
+        for table, col, ddl in MIGRATIONS:  # columns added after v0.1, for upgraded installs
+            if col not in [r["name"] for r in c.execute(f"PRAGMA table_info({table})")]:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS games_lobby_user ON games(lobby_id, user_id) WHERE lobby_id IS NOT NULL")
         c.execute("INSERT OR IGNORE INTO settings VALUES('registration_open','1')")
 
@@ -96,6 +108,16 @@ def valid_username(name):
     if not isinstance(name, str) or not re.fullmatch(USERNAME_RE, name):
         raise Err(400, "Username must be 3-20 letters, digits, '.', '_' or '-'")
     return name
+
+
+def bounded(v, lo, hi, what):
+    if not lo <= v <= hi:
+        raise Err(400, f"{what} must be between {lo} and {hi}")
+    return v
+
+
+def rank_name(rp):
+    return [name for floor, name in RANKS if rp >= floor][-1]
 
 
 def valid_password(pw):
@@ -179,7 +201,10 @@ def api_logout(h, b):
 
 def api_me(h, b):
     u = h.user()
-    return {"username": u["username"], "is_admin": bool(u["is_admin"]), "cheat_reveal": bool(u["cheat_reveal"])}
+    nxt = next((floor for floor, _ in RANKS if floor > u["rank_points"]), None)
+    return {"username": u["username"], "is_admin": bool(u["is_admin"]), "cheat_reveal": bool(u["cheat_reveal"]),
+            "rank": rank_name(u["rank_points"]), "rank_points": u["rank_points"], "next_rank_at": nxt,
+            "legend": bool(u["legend"]), "legend_eligible": u["rank_points"] >= LEGEND_RP, "mmr": round(u["mmr"])}
 
 
 def game_state(u, gid):
@@ -249,8 +274,77 @@ def api_guess(h, b, gid):
             raise Err(409, "Already guessed")
         c.execute("UPDATE games SET total=total+?, done=? WHERE id=?", (s, int(done), r["game_id"]))
         total = c.execute("SELECT total FROM games WHERE id=?", (r["game_id"],)).fetchone()["total"]
+        if done:
+            settle(c, r["game_id"])
     return {"distance_km": km, "score": s, "total": total, "done": done,
             "answer": {"lat": r["lat"], "lng": r["lng"]}, "guess": {"lat": lat, "lng": lng}}
+
+
+def settle(c, game_id):
+    """Award RP (ranked) or MMR (legend) once both players of a 1v1 match have finished. Runs inside the guess transaction."""
+    lb = c.execute("SELECT l.* FROM lobbies l JOIN games g ON g.lobby_id=l.id WHERE g.id=?", (game_id,)).fetchone()
+    if not lb or lb["mode"] not in ("ranked", "legend"):
+        return
+    p = c.execute("""SELECT u.id, u.rank_points, u.mmr, COALESCE(g.total,0) total, COALESCE(g.done,0) done
+        FROM lobby_members m JOIN users u ON u.id=m.user_id LEFT JOIN games g ON g.lobby_id=m.lobby_id AND g.user_id=m.user_id
+        WHERE m.lobby_id=? ORDER BY u.id""", (lb["id"],)).fetchall()
+    if len(p) != 2 or not all(x["done"] for x in p):
+        return
+    if c.execute("UPDATE lobbies SET settled=1 WHERE id=? AND settled=0", (lb["id"],)).rowcount != 1:
+        return  # already settled
+    a, b = p
+    result = 1 if a["total"] > b["total"] else 0 if a["total"] < b["total"] else 0.5  # a's result
+    for me, opp, res in ((a, b, result), (b, a, 1 - result)):
+        if lb["mode"] == "legend":
+            delta = ELO_K * (res - 1 / (1 + 10 ** ((opp["mmr"] - me["mmr"]) / 400)))
+            c.execute("UPDATE users SET mmr=mmr+? WHERE id=?", (delta, me["id"]))
+        else:
+            delta = WIN_RP if res == 1 else -min(LOSS_RP, me["rank_points"]) if res == 0 else 0
+            c.execute("UPDATE users SET rank_points=rank_points+? WHERE id=?", (delta, me["id"]))
+        c.execute("UPDATE lobby_members SET delta=? WHERE lobby_id=? AND user_id=?", (round(delta, 1), lb["id"], me["id"]))
+
+
+def api_ranked(h, b):
+    """Matchmaking. Matches are async: you play now, and the next player in your queue plays the same 5 places against you."""
+    u = h.user()
+    if not setting("mapillary_token"):
+        raise Err(503, "The admin has not set a Mapillary token yet")
+    mode, skill = ("legend", "u.mmr") if u["legend"] else ("ranked", "u.rank_points")
+    c = db()
+    with c:
+        c.execute("BEGIN IMMEDIATE")  # one matchmaker at a time, so two players can't both grab the same opponent
+        mine = c.execute("""SELECT l.code FROM lobbies l JOIN lobby_members m ON m.lobby_id=l.id AND m.user_id=?
+            LEFT JOIN games g ON g.lobby_id=l.id AND g.user_id=m.user_id
+            WHERE l.mode=? AND COALESCE(g.done,0)=0 ORDER BY l.id LIMIT 1""", (u["id"], mode)).fetchone()
+        if mine:
+            return {"code": mine["code"]}  # finish your current match first
+        # shortcut: an opponent who never finishes leaves the match unsettled forever; add a timeout if that bites
+        open_ = c.execute(f"""SELECT l.id, l.code FROM lobbies l JOIN users u ON u.id=l.host_id
+            WHERE l.mode=? AND l.host_id!=? AND u.banned=0
+              AND (SELECT COUNT(*) FROM lobby_members x WHERE x.lobby_id=l.id)=1
+            ORDER BY ABS({skill}-?), l.id LIMIT 1""", (mode, u["id"], u["mmr"] if u["legend"] else u["rank_points"])).fetchone()
+        if open_:
+            c.execute("INSERT INTO lobby_members(lobby_id,user_id) VALUES(?,?)", (open_["id"], u["id"]))
+            return {"code": open_["code"]}
+        code = new_lobby(c, u["id"], mode, started=1)
+    return {"code": code}
+
+
+def api_legend_enter(h, b):
+    u = h.user()
+    if u["rank_points"] < LEGEND_RP:
+        raise Err(403, f"Reach {RANKS[-1][1]} ({LEGEND_RP} RP) to enter Legend Division")
+    with db() as c:
+        c.execute("UPDATE users SET legend=1, mmr=? WHERE id=? AND legend=0", (START_MMR, u["id"]))
+    return {"ok": True}
+
+
+def api_legends(h, b):
+    """Public: no login needed."""
+    rows = db().execute("""SELECT u.username, ROUND(u.mmr) mmr,
+        (SELECT COUNT(*) FROM lobby_members m JOIN lobbies l ON l.id=m.lobby_id WHERE m.user_id=u.id AND l.mode='legend' AND l.settled=1) matches
+        FROM users u WHERE u.legend=1 AND u.banned=0 ORDER BY u.mmr DESC, u.username LIMIT 100""").fetchall()
+    return {"rows": [dict(r) for r in rows]}
 
 
 def api_peek(h, b, gid):
@@ -278,7 +372,7 @@ def get_lobby(code):
 
 def lobby_state(u, code):
     lb, c = get_lobby(code), db()
-    rows = c.execute("""SELECT u.id, u.username, m.team, g.id game_id, COALESCE(g.total,0) total, COALESCE(g.done,0) done,
+    rows = c.execute("""SELECT u.id, u.username, m.team, m.delta, g.id game_id, COALESCE(g.total,0) total, COALESCE(g.done,0) done,
         (SELECT COUNT(*) FROM rounds r WHERE r.game_id=g.id AND r.score IS NOT NULL) played
         FROM lobby_members m JOIN users u ON u.id=m.user_id
         LEFT JOIN games g ON g.lobby_id=m.lobby_id AND g.user_id=m.user_id
@@ -292,30 +386,38 @@ def lobby_state(u, code):
             teams[r["team"]] = teams.get(r["team"], 0) + r["total"]
     return {"code": lb["code"], "mode": lb["mode"], "started": bool(lb["started"]), "is_host": lb["host_id"] == u["id"],
             "rounds": ROUNDS, "teams": teams, "my_team": me["team"], "my_done": bool(me["done"]),
-            "finished": bool(lb["started"]) and all(r["done"] for r in rows),
-            "members": [{k: r[k] for k in ("username", "team", "total", "played", "done")} | {"host": r["id"] == lb["host_id"]} for r in rows]}
+            "finished": bool(lb["started"]) and all(r["done"] for r in rows) and (len(rows) == 2 or lb["mode"] not in ("ranked", "legend")),
+            "members": [{k: r[k] for k in ("username", "team", "total", "played", "done", "delta")} | {"host": r["id"] == lb["host_id"]} for r in rows]}
 
 
 def api_lobby_create(h, b):
     u = h.user()
     mode = b.get("mode")
-    if mode not in ("ffa", "2v2"):
-        raise Err(400, "Mode must be ffa or 2v2")
+    if mode not in ("1v1", "2v2"):
+        raise Err(400, "Mode must be 1v1 or 2v2")
     with db() as c:
-        for _ in range(5):
-            code = "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(6))
-            try:
-                lid = c.execute("INSERT INTO lobbies(code,mode,host_id,created) VALUES(?,?,?,?)", (code, mode, u["id"], time.time())).lastrowid
-                break
-            except sqlite3.IntegrityError:
-                continue
-        c.execute("INSERT INTO lobby_members VALUES(?,?,?)", (lid, u["id"], "A" if mode == "2v2" else None))
+        code = new_lobby(c, u["id"], mode)
     return lobby_state(u, code)
+
+
+def new_lobby(c, host_id, mode, started=0):
+    for _ in range(5):
+        code = "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(6))
+        try:
+            lid = c.execute("INSERT INTO lobbies(code,mode,host_id,started,created) VALUES(?,?,?,?,?)",
+                            (code, mode, host_id, started, time.time())).lastrowid
+            break
+        except sqlite3.IntegrityError:
+            continue
+    c.execute("INSERT INTO lobby_members(lobby_id,user_id,team) VALUES(?,?,?)", (lid, host_id, "A" if mode == "2v2" else None))
+    return code
 
 
 def api_lobby_join(h, b):
     """Join a lobby, or (2v2) switch team. Only before the host starts it."""
     u, lb = h.user(), get_lobby(b.get("code", ""))
+    if lb["mode"] in ("ranked", "legend"):
+        raise Err(403, "Ranked matches are found by matchmaking")
     if lb["started"]:
         raise Err(409, "This lobby already started")
     c = db()
@@ -328,10 +430,10 @@ def api_lobby_join(h, b):
             raise Err(400, "Team must be A or B")
         if counts[team] >= 2:
             raise Err(409, f"Team {team} is full")
-    elif len(others) >= 20:
+    elif len(others) >= (2 if lb["mode"] == "1v1" else 20):  # others excludes the joiner
         raise Err(409, "Lobby is full")
     with c:
-        c.execute("INSERT INTO lobby_members VALUES(?,?,?) ON CONFLICT(lobby_id,user_id) DO UPDATE SET team=excluded.team",
+        c.execute("INSERT INTO lobby_members(lobby_id,user_id,team) VALUES(?,?,?) ON CONFLICT(lobby_id,user_id) DO UPDATE SET team=excluded.team",
                   (lb["id"], u["id"], team))
     return lobby_state(u, lb["code"])
 
@@ -347,7 +449,7 @@ def api_lobby_start(h, b, code):
     teams = [r["team"] for r in db().execute("SELECT team FROM lobby_members WHERE lobby_id=?", (lb["id"],))]
     if lb["mode"] == "2v2" and sorted(teams) != ["A", "A", "B", "B"]:
         raise Err(409, "2v2 needs exactly 2 players on each team")
-    if lb["mode"] == "ffa" and len(teams) < 2:
+    if lb["mode"] != "2v2" and len(teams) < 2:
         raise Err(409, "Need at least 2 players")
     with db() as c:
         c.execute("UPDATE lobbies SET started=1 WHERE id=?", (lb["id"],))
@@ -369,7 +471,7 @@ def api_lobby_play(h, b, code):
 
 def api_my_lobbies(h, b):
     u = h.user()
-    rows = db().execute("""SELECT l.code, l.mode, l.started, hu.username host,
+    rows = db().execute("""SELECT l.code, l.mode, l.started, l.settled, m.delta, hu.username host,
         (SELECT COUNT(*) FROM lobby_members x WHERE x.lobby_id=l.id) players
         FROM lobby_members m JOIN lobbies l ON l.id=m.lobby_id JOIN users hu ON hu.id=l.host_id
         WHERE m.user_id=? ORDER BY l.id DESC LIMIT 20""", (u["id"],)).fetchall()
@@ -379,6 +481,7 @@ def api_my_lobbies(h, b):
 def api_admin_users(h, b):
     h.user(admin=True)
     rows = db().execute("""SELECT u.id, u.username, u.is_admin, u.banned, u.cheat_reveal, u.cheat_multiplier,
+        u.rank_points, u.legend, ROUND(u.mmr) mmr,
         u.created, u.last_login, u.last_ip, COUNT(g.id) games, SUM(g.done) finished,
         COALESCE(MAX(CASE WHEN g.done THEN g.total END),0) best, COALESCE(SUM(g.total),0) points,
         (SELECT COUNT(*) FROM sessions s WHERE s.user_id=u.id AND s.expires>?) sessions
@@ -409,13 +512,11 @@ def api_admin_user(h, b):
             f = b["fields"]
             if self_edit and (not f.get("is_admin", True) or f.get("banned")):
                 raise Err(400, "You can't demote or ban yourself")
-            mult = float(f.get("cheat_multiplier", 1))
-            if not 0 <= mult <= 100:
-                raise Err(400, "Multiplier must be between 0 and 100")
+            sets = {k: conv(f[k]) for k, conv in ADMIN_FIELDS.items() if k in f}  # only the fields sent
+            if not sets:
+                raise Err(400, "Nothing to update")
             try:
-                c.execute("UPDATE users SET username=?, is_admin=?, banned=?, cheat_reveal=?, cheat_multiplier=? WHERE id=?",
-                          (valid_username(f["username"]), int(bool(f.get("is_admin"))), int(bool(f.get("banned"))),
-                           int(bool(f.get("cheat_reveal"))), mult, uid))
+                c.execute(f"UPDATE users SET {', '.join(k + '=?' for k in sets)} WHERE id=?", (*sets.values(), uid))
             except sqlite3.IntegrityError:
                 raise Err(409, "Username taken")
             if f.get("banned"):
@@ -423,6 +524,15 @@ def api_admin_user(h, b):
         else:
             raise Err(400, "Unknown action")
     return {"ok": True}
+
+
+flag = lambda v: int(bool(v))  # noqa: E731
+ADMIN_FIELDS = {  # column -> validator; keys are fixed, so safe to put in SQL
+    "username": valid_username, "is_admin": flag, "banned": flag, "cheat_reveal": flag, "legend": flag,
+    "cheat_multiplier": lambda v: bounded(float(v), 0, 100, "Multiplier"),
+    "rank_points": lambda v: bounded(int(v), 0, 100_000, "RP"),
+    "mmr": lambda v: bounded(float(v), 0, 10_000, "MMR"),
+}
 
 
 def api_admin_settings(h, b):
@@ -444,6 +554,9 @@ ROUTES = [
     ("POST", r"/api/game/(\d+)/guess", api_guess),
     ("GET", r"/api/game/(\d+)/peek", api_peek),
     ("GET", r"/api/lobbies", api_my_lobbies),
+    ("POST", r"/api/ranked", api_ranked),
+    ("POST", r"/api/legend/enter", api_legend_enter),
+    ("GET", r"/api/legends", api_legends),
     ("POST", r"/api/lobby", api_lobby_create),
     ("POST", r"/api/lobby/join", api_lobby_join),
     ("GET", r"/api/lobby/([A-Za-z0-9]{6})", api_lobby),
