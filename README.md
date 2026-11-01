@@ -36,16 +36,35 @@ Matchmade games don't wait for everyone to be online: you play straight away, an
 
 ## Admin panel
 
-Log in as an admin and open **Admin** from the account menu.
-- **Accounts**: rename, change rank (choosing a rank snaps RP into its range, and *Legend* moves the player into Legend Division), edit RP and MMR, make admin, ban, set a password, kick, reset stats, delete. You also see open reports, join date, last login, IP, sessions, daily streak, and games.
-- **Reports**: every report with the reporter, reason, note and match link. Ban (which also closes every other open report about that player), resolve, or dismiss.
+Log in as an admin and open **Admin** from the account menu. The admin panel controls the whole game:
+
+- **Accounts**:
+  - create accounts (optionally as admins)
+  - rename players and change their rank (choosing a rank snaps RP into its range, and *Legend* moves the player into Legend Division)
+  - edit RP, MMR and daily streak
+  - make admin, ban, set a password, kick, reset stats, delete
+  - see open reports, join date, last login, IP, sessions and games
+- **Matches**: every match in every mode, with players, scores, progress, results and RP/MMR changes.
+  - *End now* resolves a match early: anyone who didn't finish forfeits.
+  - *Void* reverses any RP/MMR the match gave or took, and deletes it and its games.
+- **Reports**: ban (which also closes every other open report about that player), resolve, dismiss, or delete.
+- **Game rules**: every number in the game, each with its default shown:
+  - rounds per game, max points per round, how forgiving scoring is
+  - the rank thresholds (Silver through Master)
+  - the RP formula (swing, gap scale, cap, minimum, blowout margin) and the MMR formula (swing, gap scale, starting MMR)
+  - daily reward amounts and cycle length
+  - match expiry, login lockout, session length, and the daily report limit
+- **Modes & features** (also under Game rules): switch ranked, Legend Division, duel and team-duel matchmaking, private lobbies, practice, daily rewards and reports on or off. **Maintenance mode** lets only admins start games, while games already in progress can finish.
+- **Locations**: the list of areas rounds are drawn from (latitude, longitude per line), and how far from each area's centre a round can land. One click returns to the built-in world list.
+- **Settings**: the announcement banner (shown to everyone, including on the login page), the Mapillary token, and whether sign-ups are open.
+  - The **Danger zone** can reset the season (all RP, Legend status and MMR), wipe all matches, or wipe all reports. Each needs you to type the action's name to confirm.
 - **My cheats**: admin-only, and they apply only to your own account, in every mode. Nobody can switch cheats on for someone else, and demoting an admin switches their cheats off.
   - **Peek**: an eye button shows a small dot on the real location.
   - **Aimbot**: a target button places your pin 2 to 40 km from the answer, so it looks legit.
   - **Rank shield**: you never lose RP or MMR.
   - **Score multiplier**: every round's score is multiplied by this.
   - **Score floor**: every round is worth at least this many points.
-- **Settings**: the Mapillary token, and whether sign-ups are open.
+- **Log**: every admin action, newest first, showing who did what. Personal cheat settings are never logged.
 
 ## Layout
 

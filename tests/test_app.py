@@ -316,21 +316,123 @@ q3("me")
 q3b("me", expect=401)  # other sessions are logged out
 
 # ---- stale matches: unfilled ones close, no-shows forfeit ----
-app.MATCH_TTL = -1
+real_ttl = app.match_ttl
+app.match_ttl = lambda: -1
 q2("lobbies")  # expires everything still pending
-app.MATCH_TTL = 86400
+app.match_ttl = real_ttl
 sc = q2("queue", {"mode": "ranked"})["code"]
 play(q2, sc)
 assert q3("queue", {"mode": "ranked"})["code"] == sc  # joins, but never plays
-app.MATCH_TTL = -1
+app.match_ttl = lambda: -1
 st = q2(f"lobby/{sc}")
-app.MATCH_TTL = 86400
+app.match_ttl = real_ttl
 assert st["expired"] and st["my_result"] == 1 and {m["username"]: m["result"] for m in st["members"]} == {"pq2": 1, "pq3": 0}, st
 assert q3("queue", {"mode": "ranked"})["code"] != sc  # the expired match is gone from the queue
 
 # ---- ranked leaderboard ----
 board = client()("ranked-board")["rows"]  # public
 assert all(r["rank"] for r in board) and "ben" not in [r["username"] for r in board]  # legends are listed separately
+
+# ---- the admin panel controls everything ----
+rules = {r["key"]: r for r in boss("admin/config")["rules"]}
+assert rules["rounds"]["value"] == 5 and rules["maintenance"]["type"] == "bool" and rules["rp_k"]["group"] == "Ranked RP"
+q2("admin/config", expect=403)
+boss("admin/config", {"values": {"rounds": 0}}, expect=400)
+boss("admin/config", {"values": {"nope": 1}}, expect=400)
+boss("admin/config", {"values": {"rank_gold": 50}}, expect=400)  # thresholds must keep climbing
+
+# rounds and scoring
+boss("admin/config", {"values": {"rounds": 3, "max_round_score": 2000}})
+g = q2("game", {})
+assert g["rounds"] == 3
+for _ in range(3):
+    r = q2(f"game/{g['id']}/guess", {"lat": 48.857, "lng": 2.352})
+    g = q2(f"game/{g['id']}")
+assert r["done"] and r["score"] == 2000 and g["total"] == 6000, (r, g)
+boss("admin/config", {"values": {"rounds": 5, "max_round_score": 1000}})
+
+# rank thresholds
+boss("admin/user", {"id": ids["pq2"], "action": "update", "fields": {"rank_points": 15}})
+assert q2("me")["rank"] == "Bronze"
+boss("admin/config", {"values": {"rank_silver": 10}})
+me2 = q2("me")
+assert me2["rank"] == "Silver" and me2["rank_floor"] == 10 and me2["next_rank_at"] == 200
+boss("admin/config", {"values": {"rank_silver": 100}})
+
+# modes & features on/off, public status
+off = {"mode_2v2": False, "mode_practice": False, "daily_enabled": False, "reports_enabled": False, "mode_private": False, "mode_legend": False}
+boss("admin/config", {"values": off})
+q2("queue", {"mode": "2v2"}, expect=403)
+q2("game", {}, expect=403)
+q2("daily", {}, expect=403)
+q2("report", {"username": "pq4", "reason": "other"}, expect=403)
+q2("lobby", {"mode": "1v1"}, expect=403)
+q2("legend/enter", {}, expect=403)
+st = client()("status")
+assert st["modes"]["2v2"] is False and st["modes"]["ranked"] is True and not st["daily_enabled"]
+boss("admin/config", {"values": {k: True for k in off}})
+
+# maintenance: only admins can start games
+boss("admin/config", {"values": {"maintenance": True}})
+q2("game", {}, expect=503)
+q2("queue", {"mode": "1v1"}, expect=503)
+boss("game", {})
+boss("admin/config", {"values": {"maintenance": False}})
+boss("admin/settings", {"announcement": "Season 2 starts Monday"})
+assert client()("status")["announcement"] == "Season 2 starts Monday" and q2("me")["server"]["announcement"]
+
+# daily reward amounts
+boss("admin/config", {"values": {"daily_rp": 10, "daily_cycle": 3}})
+assert q2("me")["daily_track"] == [10, 20, 30]
+boss("admin/config", {"values": {"daily_rp": 5, "daily_cycle": 7}})
+
+# matches: void undoes rating changes; end resolves now
+app.match_ttl = lambda: -1
+boss("admin/matches")  # clears every pending match so the next pairing is predictable
+app.match_ttl = real_ttl
+rp2, rp4 = q2("me")["rank_points"], q4("me")["rank_points"]
+mc = q2("queue", {"mode": "ranked"})["code"]
+play(q2, mc)
+assert q4("queue", {"mode": "ranked"})["code"] == mc
+play(q4, mc, 0, 0)
+d = {m["username"]: m["delta"] for m in q2(f"lobby/{mc}")["members"]}
+assert q2("me")["rank_points"] == rp2 + d["pq2"] and d["pq2"] > 0
+listed = next(m for m in boss("admin/matches")["matches"] if m["code"] == mc)
+assert listed["settled"] and {m["username"] for m in listed["members"]} == {"pq2", "pq4"}
+boss("admin/match", {"code": mc, "action": "void"})
+assert q2("me")["rank_points"] == rp2 and q4("me")["rank_points"] == rp4
+q2(f"lobby/{mc}", expect=404)
+mc = q2("queue", {"mode": "ranked"})["code"]
+play(q2, mc)
+boss("admin/match", {"code": mc, "action": "end"})
+assert q2(f"lobby/{mc}")["expired"]  # nobody joined: closed without a result
+boss("admin/match", {"code": mc, "action": "explode"}, expect=400)
+
+# accounts: create, edit streak; reports: delete
+boss("admin/create", {"username": "newbie", "password": "secret1", "is_admin": False})
+boss("admin/create", {"username": "newbie", "password": "secret1"}, expect=409)
+client()("login", {"username": "newbie", "password": "secret1"})
+boss("admin/user", {"id": ids["pq5"], "action": "update", "fields": {"daily_streak": 42}})
+assert next(u for u in boss("admin/users")["users"] if u["username"] == "pq5")["daily_streak"] == 42
+q4("report", {"username": "pq2", "reason": "other"})
+rid = boss("admin/reports")["reports"][0]["id"]
+boss("admin/report", {"id": rid, "action": "delete"})
+assert rid not in [r["id"] for r in boss("admin/reports")["reports"]]
+
+# locations
+boss("admin/locations", {"text": "48.85, 2.35  # Paris\n\n40.7;-74"})
+assert app.seeds() == [(48.85, 2.35), (40.7, -74.0)] and boss("admin/locations")["custom"]
+boss("admin/locations", {"text": "91, 0"}, expect=400)
+boss("admin/locations", {"text": "paris"}, expect=400)
+boss("admin/locations", {"reset": True})
+assert app.seeds() == app.SEEDS
+
+# admin log records every admin action, but never anyone's cheats
+log = boss("admin/log")["log"]
+actions = {e["action"] for e in log}
+assert {"game_rules", "match_void", "match_end", "create", "settings", "locations", "report_delete", "update"} <= actions, actions
+assert not any("cheat" in e["action"] or "cheat" in (e["detail"] or "") for e in log)
+q2("admin/log", expect=403)
 
 # deleting a host removes their lobbies but keeps other players' games
 ben_games = lambda: next(u for u in boss("admin/users")["users"] if u["username"] == "ben")["games"]  # noqa: E731
@@ -339,9 +441,18 @@ boss("admin/user", {"id": ids["ann"], "action": "delete"})
 ben(f"lobby/{code}", expect=404)
 assert ben_games() == before
 
+# ---- danger zone ----
+boss("admin/danger", {"action": "season_reset"}, expect=400)  # needs the typed confirmation
+boss("admin/danger", {"action": "season_reset", "confirm": "season_reset"})
+assert not ben("me")["legend"] and ben("me")["rank_points"] == 0 and client()("legends")["rows"] == []
+boss("admin/danger", {"action": "wipe_reports", "confirm": "wipe_reports"})
+assert boss("admin/reports")["reports"] == []
+boss("admin/danger", {"action": "wipe_matches", "confirm": "wipe_matches"})
+assert all(u["games"] == 0 for u in boss("admin/users")["users"])
+
 # settings + closed sign-ups
 boss("admin/settings", {"mapillary_token": "t2", "registration_open": False})
-assert boss("admin/settings") == {"mapillary_token": "t2", "registration_open": False}
+assert boss("admin/settings") == {"mapillary_token": "t2", "registration_open": False, "announcement": "Season 2 starts Monday"}
 client()("register", {"username": "eve", "password": "secret1"}, expect=403)
 
 # ---- login throttling (last: it locks out this IP) ----

@@ -172,10 +172,19 @@
   .modal header { display:flex; justify-content:space-between; align-items:center; }
   .modal label { display:flex; flex-direction:column; gap:6px; font-weight:700; font-size:14px; }
   .radios { display:grid; gap:8px; } .radios label { flex-direction:row; align-items:center; gap:10px; background:var(--bg2); padding:10px 12px; border-radius:10px; font-weight:600; cursor:pointer; }
-  .days { display:grid; grid-template-columns:repeat(7, 1fr); gap:6px; }
+  .days { display:grid; grid-template-columns:repeat(auto-fill, minmax(56px, 1fr)); gap:6px; }
+  .banner { display:flex; gap:10px; align-items:center; border-radius:12px; padding:12px 16px; margin-bottom:18px; font-weight:600; background:rgba(91,140,255,.14); border:1px solid rgba(91,140,255,.35); }
+  .banner.warn { background:rgba(255,182,72,.12); border-color:rgba(255,182,72,.4); }
+  .rules { display:grid; gap:16px; } .rules h3 { margin:6px 0 2px; color:var(--mute); font-size:14px; }
+  .rule { display:flex; gap:14px; align-items:center; padding:10px 0; border-top:1px solid var(--line); }
+  .rule div { flex:1; } .rule small { display:block; color:var(--mute); } .rule input[type=number] { width:110px; }
+  .rule.changed { box-shadow:-4px 0 0 var(--warn); padding-left:10px; }
+  .savebar { position:sticky; bottom:16px; display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
+  body.no-reports [data-report], body.no-reports #report-btn { display:none !important; }
+  .danger-zone { border:1px solid rgba(255,93,115,.4); }
   .days div { background:var(--bg2); border-radius:10px; padding:10px 4px; text-align:center; font-size:12px; color:var(--mute); border:2px solid transparent; }
   .days div b { display:block; color:var(--fg); font-size:15px; } .days .done { opacity:.5; } .days .today { border-color:var(--warn); color:var(--warn); }
-  #toasts { position:fixed; top:74px; left:50%; transform:translateX(-50%); z-index:200; display:flex; flex-direction:column; gap:8px; align-items:center; }
+  #toasts { position:fixed; top:74px; right:20px; z-index:200; display:flex; flex-direction:column; gap:8px; align-items:flex-end; max-width:calc(100vw - 40px); }
   .toast { background:var(--panel2); border-left:4px solid var(--go); padding:12px 18px; border-radius:10px; box-shadow:0 10px 30px rgba(0,0,0,.5); font-weight:600; }
   .toast.bad { border-color:var(--bad); }
 
@@ -209,6 +218,7 @@
 </header>
 
 <main>
+  <div id="banner" class="banner hidden" role="status"></div>
   <section id="v-auth">
     <div class="wrap">
       <div class="hero" style="margin:0;min-height:100%">
@@ -236,23 +246,23 @@
     <div class="hero">
       <svg class="globe" viewBox="0 0 200 200" fill="none" stroke="#fff" stroke-width="1"><circle cx="100" cy="100" r="96"/><ellipse cx="100" cy="100" rx="40" ry="96"/><ellipse cx="100" cy="100" rx="75" ry="96"/><path d="M4 100h192M14 55h172M14 145h172M40 22h120M40 178h120"/></svg>
       <h1 id="hello"></h1>
-      <p>Five rounds per game, up to 1,000 points each. The closer your pin, the bigger the score.</p>
+      <p id="hero-sub"></p>
     </div>
     <div class="grid modes">
-      <div class="tile" style="--accent:var(--warn)">
+      <div class="tile" style="--accent:var(--warn)" id="tile-ranked">
         <div class="icon" data-ic="trophy"></div>
         <h2>Ranked duel</h2>
         <div id="rankbox"></div>
         <p>1v1 against a player near your rank. Beat stronger players and win big to climb faster.</p>
         <div class="actions"><button class="btn" data-queue="ranked" id="rankedbtn">Find match</button><button class="btn ghost hidden" id="legend-enter">Enter Legend</button></div>
       </div>
-      <div class="tile" style="--accent:var(--blue)">
+      <div class="tile" style="--accent:var(--blue)" id="tile-1v1">
         <div class="icon" data-ic="swords"></div>
         <h2>Duel</h2>
-        <p>Head-to-head on the same five locations. Unranked, so just for bragging rights.</p>
+        <p>Head-to-head on the same locations. Unranked, so just for bragging rights.</p>
         <div class="actions"><button class="btn" data-queue="1v1">Find match</button><button class="link" data-mode="1v1">Private lobby</button></div>
       </div>
-      <div class="tile" style="--accent:#c77dff">
+      <div class="tile" style="--accent:#c77dff" id="tile-2v2">
         <div class="icon" data-ic="users"></div>
         <h2>Team duel</h2>
         <p>2 vs 2. Both your scores add up, so carry your teammate or get carried.</p>
@@ -287,7 +297,8 @@
     <h1 style="margin-bottom:18px">Admin</h1>
     <div class="tabs" id="admintabs">
       <button data-tab="accounts" class="on">Accounts</button><button data-tab="reports">Reports</button>
-      <button data-tab="cheats">My cheats</button><button data-tab="settings">Settings</button>
+      <button data-tab="matches">Matches</button><button data-tab="rules">Game rules</button><button data-tab="locations">Locations</button>
+      <button data-tab="settings">Settings</button><button data-tab="cheats">My cheats</button><button data-tab="log">Log</button>
     </div>
     <div id="admin"></div>
   </section>
@@ -413,14 +424,33 @@ async function route() {
 }
 window.addEventListener('hashchange', route);
 
+let server = {};
 async function start() {
-  try { me = await api('me'); } catch { me = null; }
+  try { me = await api('me'); server = me.server; } catch { me = null; server = await api('status').catch(() => ({})); }
   $('#top').classList.toggle('hidden', !me);
+  applyStatus();
   if (!me) { show('v-auth'); legendsInto($('#v-auth .legends'), 8); return; }
   topbar();
   route();
 }
-async function refreshMe() { me = await api('me'); topbar(); }
+async function refreshMe() { me = await api('me'); server = me.server; topbar(); applyStatus(); }
+function applyStatus() {
+  const b = $('#banner'), msgs = [];
+  if (server.maintenance) msgs.push(me?.is_admin ? 'Maintenance mode is on: only admins can start games.' : 'The game is in maintenance. New games are paused; check back soon!');
+  if (server.announcement) msgs.push(esc(server.announcement));
+  b.classList.toggle('hidden', !msgs.length); b.classList.toggle('warn', !!server.maintenance);
+  b.innerHTML = msgs.join(' · ');
+  $('#signup').classList.toggle('hidden', server.registration_open === false);
+  const m = server.modes || {};
+  $('#tile-ranked').classList.toggle('hidden', m.ranked === false);
+  $$('[data-queue="1v1"], [data-queue="2v2"]').forEach(x => x.classList.toggle('hidden', m[x.dataset.queue] === false));
+  $$('[data-mode]').forEach(x => x.classList.toggle('hidden', m.private === false));
+  ['1v1', '2v2'].forEach(k => $('#tile-' + k).classList.toggle('hidden', m[k] === false && m.private === false));
+  $('#practice').classList.toggle('hidden', m.practice === false);
+  $('#joinform').classList.toggle('hidden', m.private === false);
+  $('#gift').classList.toggle('hidden', server.daily_enabled === false);
+  document.body.classList.toggle('no-reports', server.reports_enabled === false);
+}
 
 function topbar() {
   const rank = me.legend ? 'Legend' : me.rank;
@@ -465,9 +495,9 @@ $('#signup').onclick = () => auth('register');
 
 // ---------- daily reward ----------
 $('#gift').onclick = () => {
-  const d = me.daily_next, unit = d.unit, per = me.legend ? 1 : 5;
+  const d = me.daily_next, unit = d.unit;
   const done = i => me.daily_available ? i < d.day : (d.day === 1 ? true : i < d.day);
-  const cells = [1, 2, 3, 4, 5, 6, 7].map(i => `<div class="${done(i) ? 'done' : ''} ${me.daily_available && i === d.day ? 'today' : ''}">Day ${i}<b>+${i * per}</b>${unit}</div>`).join('');
+  const cells = me.daily_track.map((amt, k) => { const i = k + 1; return `<div class="${done(i) ? 'done' : ''} ${me.daily_available && i === d.day ? 'today' : ''}">Day ${i}<b>+${amt}</b>${unit}</div>`; }).join('');
   modal('Daily reward', `<p class="mute" style="margin:0">Come back every day to grow your reward. Miss a day and the streak starts over.</p>
     <div class="days">${cells}</div>
     <div class="row" style="justify-content:space-between"><span><b>${me.daily_streak}</b> <span class="mute">day streak</span></span>
@@ -485,11 +515,12 @@ async function home() {
   show('v-home');
   await refreshMe();
   $('#hello').textContent = `Welcome back, ${me.username}`;
+  $('#hero-sub').textContent = `${server.rounds} rounds per game, up to ${fmt(server.max_round_score)} points each. The closer your pin, the bigger the score.`;
   const rank = me.legend ? 'Legend' : me.rank;
-  const prevFloor = me.next_rank_at ? me.next_rank_at - 100 : 500;
+  const span = me.next_rank_at ? me.next_rank_at - me.rank_floor : 1;
   $('#rankbox').innerHTML = `<div class="row" style="gap:10px">${badge(rank, 40)}<div><div class="display" style="font-size:20px">${rank}</div>
     <div class="mute small">${me.legend ? `${fmt(me.mmr)} MMR` : me.next_rank_at ? `${me.rank_points} RP · ${me.next_rank_at - me.rank_points} to next rank` : `${me.rank_points} RP · top rank reached`}</div></div></div>
-    ${me.legend || !me.next_rank_at ? '' : `<div class="progress" style="margin-top:10px"><i style="width:${(me.rank_points - prevFloor) / 100 * 100}%"></i></div>`}`;
+    ${me.legend || !me.next_rank_at ? '' : `<div class="progress" style="margin-top:10px"><i style="width:${(me.rank_points - me.rank_floor) / span * 100}%"></i></div>`}`;
   $('#legend-enter').classList.toggle('hidden', !me.legend_eligible || me.legend);
   const { lobbies } = await api('lobbies');
   $('#mylobbies').innerHTML = lobbies.map(l => {
@@ -607,7 +638,7 @@ async function lobby(code) {
 function playerCard(l, m, winners) {
   const mine = m.username === me.username;
   return `<div class="card ${mine ? 'mine' : ''} ${winners && m.result === 1 ? 'won' : ''}">${avatar(m.username)}
-    <div class="who">${plink(m.username)}<div class="dots">${[1, 2, 3, 4, 5].map(i => `<i class="${i <= m.played ? 'on' : ''}"></i>`).join('')}</div></div>
+    <div class="who">${plink(m.username)}<div class="dots">${Array.from({ length: l.rounds }, (_, k) => k + 1).map(i => `<i class="${i <= m.played ? 'on' : ''}"></i>`).join('')}</div></div>
     <div class="score">${fmt(m.total)}<div class="small">${deltaTxt(m.delta, l.mode)}</div></div>
     ${mine ? '' : `<button class="iconbtn" data-report="${esc(m.username)}" aria-label="Report ${esc(m.username)}" title="Report">${ic('flag', 16)}</button>`}</div>`;
 }
@@ -632,8 +663,8 @@ async function paintLobby() {
       + (l.expired ? '<p class="mute">The match expired: anyone who didn\'t finish in 24 hours forfeits.</p>' : '')
     : l.expired ? '<h1>Expired</h1><p class="mute">Nobody else joined within 24 hours.</p>'
     : !l.started ? `<h1>Lobby</h1><p class="mute">${l.is_host ? `Send your friends this code, then start when everyone's in.${team2 ? ' You need two players on each team.' : ''}` : 'Waiting for the host to start the match…'}</p>`
-    : l.matchmade && l.members.length < seats ? `<h1>Matchmaking</h1><p class="mute">Play your five rounds now. Your opponent${team2 ? 's' : ''} will get the same locations, and the result shows up under Your matches.</p>`
-    : `<h1>${l.my_done ? 'Waiting for the others' : 'Your turn'}</h1><p class="mute">${l.my_done ? 'Scores update live as everyone finishes.' : 'Five rounds. The same locations for everyone.'}</p>`;
+    : l.matchmade && l.members.length < seats ? `<h1>Matchmaking</h1><p class="mute">Play your ${l.rounds} rounds now. Your opponent${team2 ? 's' : ''} will get the same locations, and the result shows up under Your matches.</p>`
+    : `<h1>${l.my_done ? 'Waiting for the others' : 'Your turn'}</h1><p class="mute">${l.my_done ? 'Scores update live as everyone finishes.' : `${l.rounds} rounds. The same locations for everyone.`}</p>`;
   $('#lobby').innerHTML = `<div class="row" style="justify-content:space-between;align-items:flex-start">
       <div><div class="mute display small" style="font-size:14px">${MODES[l.mode]}${l.matchmade ? '' : ' · private'}</div>${status}</div>
       ${l.matchmade ? '' : `<div style="text-align:right"><div class="mute small">Lobby code</div><div class="row" style="gap:6px"><span class="code">${l.code}</span><button class="iconbtn" id="copycode" aria-label="Copy code">${ic('copy')}</button></div></div>`}
@@ -736,7 +767,7 @@ $('#guess').onclick = async () => {
     <div class="bar"><i style="width:0"></i></div>
     <p class="mute" style="margin:0 0 16px">Your guess was <b style="color:var(--fg)">${dist(r.distance_km)}</b> from the correct location. Total: <b style="color:var(--fg)">${fmt(r.total)}</b></p>
     <button class="btn big" id="next">${r.done ? 'View results' : 'Next round'}</button>`;
-  requestAnimationFrame(() => requestAnimationFrame(() => $('#resultbar .bar i').style.width = Math.min(100, r.score / 10) + '%'));
+  requestAnimationFrame(() => requestAnimationFrame(() => $('#resultbar .bar i').style.width = Math.min(100, r.score / server.max_round_score * 100) + '%'));
 };
 $('#resultbar').addEventListener('click', async e => {
   if (e.target.id === 'next') {
@@ -753,12 +784,12 @@ function summary() {
   game.history.forEach(h => { const g = [h.guess_lat, h.guess_lng], a = [h.lat, h.lng]; drawPair(layer, g, a, h.n); pts.push(g, a); });
   rmap.fitBounds(pts, { padding: [50, 50], maxZoom: 6 });
   $('#resultbar').innerHTML = `<div class="mute display" style="font-size:13px">${MODES[game.mode] || 'Practice'} · final score</div>
-    <div class="pts">${fmt(game.total)} <span style="font-size:20px">/ ${fmt(game.rounds * 1000)}</span></div>
+    <div class="pts">${fmt(game.total)} <span style="font-size:20px">/ ${fmt(game.rounds * server.max_round_score)}</span></div>
     <div class="bar"><i style="width:0"></i></div>
     <div class="rounds">${game.history.map(h => `<div><span class="mute">Round ${h.n}</span><b>${fmt(h.score)}</b><span class="mute small">${dist(h.distance)}</span></div>`).join('')}</div>
     <div class="row" style="justify-content:center">${game.lobby ? '<button class="btn big" id="tomatch">See the match</button>' : '<button class="btn big" id="again">Play again</button>'}
     <button class="btn ghost" id="home">Home</button></div>`;
-  requestAnimationFrame(() => requestAnimationFrame(() => $('#resultbar .bar i').style.width = Math.min(100, game.total / game.rounds / 10) + '%'));
+  requestAnimationFrame(() => requestAnimationFrame(() => $('#resultbar .bar i').style.width = Math.min(100, game.total / game.rounds / server.max_round_score * 100) + '%'));
 }
 
 // ---------- admin ----------
@@ -766,7 +797,9 @@ let adminTab = 'accounts';
 async function admin() {
   show('v-admin');
   $$('#admintabs button').forEach(b => { b.classList.toggle('on', b.dataset.tab === adminTab); if (b.dataset.tab === 'reports') b.innerHTML = 'Reports' + (me.open_reports ? `<span class="count">${me.open_reports}</span>` : ''); });
-  await ({ accounts: adminAccounts, reports: adminReports, cheats: adminCheats, settings: adminSettings })[adminTab]();
+  $('#admin').onclick = $('#admin').onchange = $('#admin').oninput = null;
+  await ({ accounts: adminAccounts, matches: adminMatches, reports: adminReports, rules: adminRules, locations: adminLocations,
+           settings: adminSettings, cheats: adminCheats, log: adminLog })[adminTab]();
 }
 $('#admintabs').onclick = e => { const t = e.target.closest('[data-tab]'); if (t) { adminTab = t.dataset.tab; admin().catch(fail); } };
 
@@ -774,7 +807,9 @@ async function adminAccounts() {
   const { users, ranks } = await api('admin/users');
   const opts = u => [...ranks.map(r => r.name), 'Legend'].map(n => `<option ${n === u.rank ? 'selected' : ''}>${n}</option>`).join('');
   const box = (k, on, label) => `<label class="small" style="display:inline-flex;gap:4px;align-items:center"><input type="checkbox" data-f="${k}" ${on ? 'checked' : ''}>${label}</label>`;
-  $('#admin').innerHTML = `<div class="panel admin-table"><table><thead><tr>
+  $('#admin').innerHTML = `<div class="row" style="justify-content:space-between;margin-bottom:12px"><span class="mute">${users.length} accounts</span>
+    <button class="btn sm" data-act="create">+ Create account</button></div>
+    <div class="panel admin-table"><table><thead><tr>
       <th>Player</th><th>Rank</th><th>RP</th><th>MMR</th><th>Roles</th><th>Reports</th><th>Activity</th><th class="num">Games</th><th></th></tr></thead><tbody>
     ${users.map(u => `<tr data-id="${u.id}" data-name="${esc(u.username)}">
       <td><input type="text" data-f="username" value="${esc(u.username)}" aria-label="Username"></td>
@@ -783,7 +818,7 @@ async function adminAccounts() {
       <td><input type="number" data-f="mmr" value="${u.mmr}" min="0" step="1" aria-label="MMR"></td>
       <td>${box('is_admin', u.is_admin, 'Admin')} ${box('banned', u.banned, 'Banned')}</td>
       <td>${u.open_reports ? `<span class="pill loss">${u.open_reports} open</span>` : '<span class="mute">—</span>'}</td>
-      <td class="small"><div>Joined ${u.created ? new Date(u.created * 1000).toLocaleDateString() : '—'}</div><div class="mute">Seen ${u.last_login ? ago(u.last_login) : 'never'} · ${esc(u.last_ip || 'no IP')} · ${u.sessions} session${u.sessions === 1 ? '' : 's'} · ${u.daily_streak}-day streak</div></td>
+      <td class="small"><div>Joined ${u.created ? new Date(u.created * 1000).toLocaleDateString() : '—'}</div><div class="mute">Seen ${u.last_login ? ago(u.last_login) : 'never'} · ${esc(u.last_ip || 'no IP')} · ${u.sessions} session${u.sessions === 1 ? '' : 's'} · streak <input type="number" data-f="daily_streak" value="${u.daily_streak}" min="0" style="width:56px;padding:2px 6px" aria-label="Daily streak"></div></td>
       <td class="num">${u.finished || 0}/${u.games}<div class="mute small">best ${fmt(u.best)}</div></td>
       <td><div class="acts"><button class="btn sm" data-act="update">Save</button>
         <select data-more aria-label="More actions for ${esc(u.username)}"><option value="">More…</option><option value="password">Set password</option>
@@ -795,7 +830,10 @@ async function adminAccounts() {
     const tr = e.target.closest('tr'), rp = $('[data-f=rank_points]', tr), i = ranks.findIndex(r => r.name === e.target.value);
     if (i >= 0 && !(+rp.value >= ranks[i].rp && (i === ranks.length - 1 || +rp.value < ranks[i + 1].rp))) rp.value = ranks[i].rp;
   };
-  $('#admin').onclick = e => e.target.dataset.act && doAct(e.target.closest('tr'), e.target.dataset.act);
+  $('#admin').onclick = e => {
+    if (e.target.dataset.act === 'create') return createAccount();
+    e.target.dataset.act && doAct(e.target.closest('tr'), e.target.dataset.act);
+  };
   async function doAct(tr, act) {
     const name = tr.dataset.name, body = { id: +tr.dataset.id, action: act };
     if (act === 'update') {
@@ -819,8 +857,8 @@ async function adminReports() {
   $('#admin').innerHTML = `<div class="grid">${reports.map(r => `<div class="report ${r.status === 'open' ? '' : 'closed'}" data-id="${r.id}">
       <div class="row" style="justify-content:space-between"><div class="row" style="gap:8px">${avatar(r.target)}<div>${plink(r.target)} <span class="pill ${r.status === 'open' ? 'loss' : 'draw'}">${esc(r.reason_label)}</span>
         ${r.target_banned ? '<span class="pill draw">banned</span>' : ''}<div class="mute small">Reported by ${r.reporter ? plink(r.reporter) : 'a deleted user'} · ${ago(r.created)}${r.lobby_code ? ` · match <a href="#/lobby/${esc(r.lobby_code)}">${esc(r.lobby_code)}</a>` : ''} · ${r.target_reports} report${r.target_reports === 1 ? '' : 's'} total</div></div></div>
-        ${r.status === 'open' ? `<div class="acts row" style="gap:6px"><button class="btn sm danger" data-act="ban">Ban</button><button class="btn sm" data-act="resolve">Resolve</button><button class="btn sm ghost" data-act="dismiss">Dismiss</button></div>`
-          : `<span class="mute small">${r.status} by ${esc(r.resolved_by)} · ${ago(r.resolved_at)}</span>`}</div>
+        ${r.status === 'open' ? `<div class="acts row" style="gap:6px"><button class="btn sm danger" data-act="ban">Ban</button><button class="btn sm" data-act="resolve">Resolve</button><button class="btn sm ghost" data-act="dismiss">Dismiss</button><button class="iconbtn" data-act="delete" aria-label="Delete report" title="Delete report">${ic('x', 16)}</button></div>`
+          : `<div class="row" style="gap:6px"><span class="mute small">${r.status} by ${esc(r.resolved_by)} · ${ago(r.resolved_at)}</span><button class="iconbtn" data-act="delete" aria-label="Delete report" title="Delete report">${ic('x', 16)}</button></div>`}</div>
       ${r.details ? `<blockquote>${esc(r.details)}</blockquote>` : ''}</div>`).join('') || '<div class="panel empty">No reports. Everyone\'s behaving.</div>'}</div>`;
   $('#admin').onchange = null;
   $('#admin').onclick = async e => {
@@ -852,16 +890,104 @@ async function adminCheats() {
 }
 
 async function adminSettings() {
-  const s = await api('admin/settings');
-  $('#admin').innerHTML = `<div class="panel" style="max-width:640px"><form id="settings" class="grid">
+  const [s, { danger }] = await Promise.all([api('admin/settings'), api('admin/users')]);
+  $('#admin').innerHTML = `<div class="grid" style="max-width:720px"><div class="panel"><form id="settings" class="grid">
+    <label class="grid" style="gap:6px"><b>Announcement</b><span class="mute small">Shown in a banner to everyone, including on the login page. Leave empty to hide it.</span>
+      <textarea id="s-ann" rows="2" maxlength="500">${esc(s.announcement)}</textarea></label>
     <label class="grid" style="gap:6px"><b>Mapillary client token</b><span class="mute small">Free at mapillary.com/dashboard/developers. Register an app and copy its client token.</span><input id="s-token" value="${esc(s.mapillary_token)}"></label>
     <div class="switch"><div><b>Open sign-ups</b><small>Let anyone create an account. Turn off to freeze the player list.</small></div><input type="checkbox" class="toggle" id="s-reg" ${s.registration_open ? 'checked' : ''} aria-label="Open sign-ups"></div>
-    <div><button class="btn">Save settings</button></div></form></div>`;
-  $('#admin').onclick = $('#admin').onchange = null;
+    <div><button class="btn">Save settings</button></div></form></div>
+    <div class="panel danger-zone"><h2 style="color:var(--bad);margin-bottom:6px">Danger zone</h2><p class="mute" style="margin-top:0">These can't be undone. Back up the app in YunoHost first.</p>
+      ${Object.entries(danger).map(([k, v]) => `<div class="switch"><div><b style="text-transform:capitalize">${k.replace('_', ' ')}</b><small>${esc(v)}</small></div><button class="btn sm danger" data-danger="${k}">Run</button></div>`).join('')}</div></div>`;
   $('#settings').onsubmit = async e => {
     e.preventDefault();
-    try { await api('admin/settings', { mapillary_token: $('#s-token').value, registration_open: $('#s-reg').checked }); toast('Settings saved'); } catch (err) { fail(err); }
+    try { await api('admin/settings', { announcement: $('#s-ann').value, mapillary_token: $('#s-token').value, registration_open: $('#s-reg').checked }); toast('Settings saved'); refreshMe(); }
+    catch (err) { fail(err); }
   };
+  $('#admin').onclick = e => {
+    const k = e.target.dataset.danger; if (!k) return;
+    modal('Are you absolutely sure?', `<p class="mute" style="margin:0">${esc(danger[k])}. Type <b style="color:var(--fg)">${k}</b> to confirm.</p>
+      <input id="dz" autocomplete="off" aria-label="Confirmation"><div class="err" id="dz-err"></div><button class="btn danger" id="dz-go">I understand, do it</button>`, (m, close) => {
+      $('#dz-go', m).onclick = async () => {
+        try { await api('admin/danger', { action: k, confirm: $('#dz', m).value.trim() }); close(); toast('Done'); refreshMe(); } catch (err) { $('#dz-err', m).textContent = err.message; }
+      };
+    });
+  };
+}
+
+function createAccount() {
+  modal('Create account', `<label>Username<input id="ca-name" autocomplete="off"></label><label>Password<input id="ca-pw" type="text" autocomplete="off"></label>
+    <label style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="ca-admin"> Make admin</label>
+    <div class="err" id="ca-err"></div><button class="btn" id="ca-go">Create</button>`, (m, close) => {
+    $('#ca-go', m).onclick = async () => {
+      try { await api('admin/create', { username: $('#ca-name', m).value.trim(), password: $('#ca-pw', m).value, is_admin: $('#ca-admin', m).checked }); close(); toast('Account created'); adminAccounts(); }
+      catch (err) { $('#ca-err', m).textContent = err.message; }
+    };
+  });
+}
+
+async function adminMatches() {
+  const { matches } = await api('admin/matches');
+  const state = m => m.settled ? (m.members.some(x => x.result != null) ? '<span class="pill win">Finished</span>' : '<span class="pill draw">Closed</span>')
+    : !m.started ? '<span class="pill wait">Lobby</span>' : m.seats && m.members.length < m.seats ? '<span class="pill wait">Searching</span>' : '<span class="pill wait">Playing</span>';
+  $('#admin').innerHTML = `<div class="panel admin-table"><table><thead><tr><th>Match</th><th>Status</th><th>Players</th><th>Created</th><th></th></tr></thead><tbody>
+    ${matches.map(m => `<tr data-code="${m.code}"><td><b>${MODES[m.mode]}</b><div class="mute small">${m.code}${m.matchmade ? '' : ' · private'} · ${m.rounds} rounds</div></td><td>${state(m)}</td>
+      <td style="white-space:normal">${m.members.map(x => `<div>${m.mode === '2v2' ? `<span class="mute">${x.team}</span> ` : ''}${plink(x.username)} <b>${fmt(x.total)}</b> <span class="mute small">${x.played}/${m.rounds}</span> ${resultPill(x.result)} ${deltaTxt(x.delta, m.mode)}</div>`).join('') || '<span class="mute">nobody</span>'}</td>
+      <td class="small mute">${ago(m.created)}</td>
+      <td><div class="acts"><a class="btn sm ghost" href="#/lobby/${m.code}">Open</a>${m.settled ? '' : '<button class="btn sm" data-act="end">End now</button>'}<button class="btn sm danger" data-act="void">Void</button></div></td></tr>`).join('')
+      || '<tr><td class="empty" colspan="5">No matches yet.</td></tr>'}</tbody></table></div>`;
+  $('#admin').onclick = async e => {
+    const act = e.target.dataset.act; if (!act) return;
+    const code = e.target.closest('tr').dataset.code;
+    const ok = act === 'end' ? await confirmBox('End this match now?', 'Anyone who hasn\'t finished forfeits. If nobody else joined, it closes without a result.', 'End match')
+      : await confirmBox('Void this match?', 'Any RP/MMR it gave or took is reversed, and the match and its games are deleted.', 'Void');
+    if (!ok) return;
+    try { await api('admin/match', { code, action: act }); toast(act === 'end' ? 'Match ended' : 'Match voided'); adminMatches(); } catch (err) { fail(err); }
+  };
+}
+
+async function adminRules() {
+  const { rules } = await api('admin/config');
+  const groups = [...new Set(rules.map(r => r.group))];
+  const input = r => r.type === 'bool' ? `<input type="checkbox" class="toggle" data-rule="${r.key}" ${r.value ? 'checked' : ''} aria-label="${esc(r.label)}">`
+    : `<input type="number" data-rule="${r.key}" value="${r.value}" min="${r.min}" max="${r.max}" step="${r.type === 'float' ? 'any' : 1}" aria-label="${esc(r.label)}">`;
+  $('#admin').innerHTML = `<div class="panel rules" style="max-width:820px">
+    <p class="mute" style="margin:0">Every rule of the game. Changes apply right away; games already in progress keep their round count.</p>
+    ${groups.map(g => `<div><h3>${g}</h3>${rules.filter(r => r.group === g).map(r => `<div class="rule"><div><b>${esc(r.label)}</b>
+      <small>${esc(r.help)}${r.type === 'bool' ? '' : `${r.help ? ' ' : ''}Default ${r.default}.`}</small></div>${input(r)}</div>`).join('')}</div>`).join('')}
+    <div class="savebar"><button class="btn ghost" id="rules-reset">Reset all to defaults</button><button class="btn" id="rules-save">Save changes</button></div></div>`;
+  const read = el => el.type === 'checkbox' ? el.checked : el.value;
+  $('#admin').oninput = $('#admin').onchange = e => {
+    const r = rules.find(x => x.key === e.target.dataset.rule);
+    if (r) e.target.closest('.rule').classList.toggle('changed', String(read(e.target)) !== String(r.value));
+  };
+  const save = async values => {
+    try { await api('admin/config', { values }); toast('Game rules saved'); await refreshMe(); adminRules(); } catch (err) { fail(err); }
+  };
+  $('#rules-save').onclick = () => save(Object.fromEntries($$('[data-rule]').filter(el => el.closest('.changed')).map(el => [el.dataset.rule, read(el)])));
+  $('#rules-reset').onclick = async () => {
+    if (await confirmBox('Reset every rule?', 'All game rules go back to their defaults.', 'Reset')) save(Object.fromEntries(rules.map(r => [r.key, r.default])));
+  };
+}
+
+async function adminLocations() {
+  const loc = await api('admin/locations');
+  $('#admin').innerHTML = `<div class="panel grid" style="max-width:720px">
+    <div><h2>Locations</h2><p class="mute" style="margin:6px 0 0">Each round picks one of these areas at random, then finds street imagery near it (the spread is under Game rules → Locations).
+      One area per line as <b>latitude, longitude</b>; anything after # is a comment. ${loc.custom ? 'You\'re using a custom list.' : 'This is the built-in world list.'}</p></div>
+    <textarea id="loc" rows="16" spellcheck="false" style="font-family:ui-monospace,monospace;font-size:13px">${esc(loc.text)}</textarea>
+    <div class="row" style="justify-content:space-between"><span class="mute">${loc.count} areas</span>
+      <div class="row"><button class="btn ghost" id="loc-reset">Use the world list</button><button class="btn" id="loc-save">Save</button></div></div></div>`;
+  $('#loc-save').onclick = async () => { try { await api('admin/locations', { text: $('#loc').value }); toast('Locations saved'); adminLocations(); } catch (err) { fail(err); } };
+  $('#loc-reset').onclick = async () => { try { await api('admin/locations', { reset: true }); toast('Back to the world list'); adminLocations(); } catch (err) { fail(err); } };
+}
+
+async function adminLog() {
+  const { log } = await api('admin/log');
+  $('#admin').innerHTML = `<div class="panel admin-table"><p class="mute" style="margin-top:0">Every admin action, newest first. Personal cheat settings are never logged.</p>
+    <table><thead><tr><th>When</th><th>Admin</th><th>Action</th><th>Details</th></tr></thead><tbody>
+    ${log.map(e => `<tr><td class="small mute" title="${new Date(e.ts * 1000).toLocaleString()}">${ago(e.ts)}</td><td>${esc(e.admin)}</td><td><b>${esc(e.action.replace(/_/g, ' '))}</b></td>
+      <td class="small" style="white-space:normal;word-break:break-word">${esc(e.detail)}</td></tr>`).join('') || '<tr><td class="empty" colspan="4">Nothing yet.</td></tr>'}</tbody></table></div>`;
 }
 
 paintIcons();

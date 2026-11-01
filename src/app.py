@@ -9,17 +9,49 @@ DB = os.environ.get("BG_DB", "game.db")
 PORT = int(os.environ.get("BG_PORT", "8095"))
 HERE = os.path.dirname(os.path.abspath(__file__))
 COOKIE = f"bg_session_{PORT}"  # per-instance, so two installs on one domain don't clash
-ROUNDS = 5
-SESSION_SECS = 30 * 86400
 USERNAME_RE = r"[A-Za-z0-9_.-]{3,20}"
-RANKS = [(0, "Bronze"), (100, "Silver"), (200, "Gold"), (300, "Platinum"), (400, "Diamond"), (500, "Master")]
-LEGEND_RP = RANKS[-1][0]  # reaching the top rank unlocks Legend Division
-START_MMR = 1500
-RP_K, RP_SCALE, RP_CAP = 40, 200, 60  # ranked: Elo-style on RP, so beating higher ranks pays more
-ELO_K, ELO_SCALE = 32, 400  # legend MMR
-BLOWOUT = 2500  # a points margin this big doubles the rating swing
-MATCH_TTL = 86400  # matchmade games older than this get resolved: unfilled ones close, no-shows forfeit
-LOGIN_WINDOW, LOGIN_MAX_FAILS = 900, 10
+RANK_NAMES = ["Bronze", "Silver", "Gold", "Platinum", "Diamond", "Master"]
+START_MMR = 1500  # schema default only; the live value is cfg("start_mmr")
+
+# Every game rule the admin panel can change: key -> (default, min, max, group, label, help).
+# The default's type (bool/int/float) is the setting's type.
+CONFIG = {
+    "rounds": (5, 1, 20, "Games", "Rounds per game", "New games and lobbies use this; games in progress keep theirs."),
+    "max_round_score": (1000, 100, 100_000, "Games", "Max points per round", "A perfect guess scores this."),
+    "score_falloff_km": (1200, 50, 20_000, "Games", "Score falloff (km)", "Bigger = more forgiving. At this distance a guess keeps ~37% of the max."),
+    "rank_silver": (100, 1, 1_000_000, "Ranks", "Silver at (RP)", "Rank thresholds must go up from Silver to Master."),
+    "rank_gold": (200, 1, 1_000_000, "Ranks", "Gold at (RP)", ""),
+    "rank_platinum": (300, 1, 1_000_000, "Ranks", "Platinum at (RP)", ""),
+    "rank_diamond": (400, 1, 1_000_000, "Ranks", "Diamond at (RP)", ""),
+    "rank_master": (500, 1, 1_000_000, "Ranks", "Master at (RP)", "Reaching Master unlocks Legend Division."),
+    "rp_k": (40, 1, 500, "Ranked RP", "RP swing (K)", "An even match moves K/2 RP; upsets move up to K."),
+    "rp_scale": (200, 10, 10_000, "Ranked RP", "RP gap scale", "At this RP gap the higher-ranked player is a 10-to-1 favourite. Smaller = rank gaps matter more."),
+    "rp_cap": (60, 1, 1000, "Ranked RP", "Max RP per match", ""),
+    "rp_min": (5, 0, 1000, "Ranked RP", "Min RP per win/loss", "A win always pays at least this; a loss always costs at least this."),
+    "blowout": (2500, 100, 1_000_000, "Ranked RP", "Blowout margin (points)", "Winning by this many points doubles the rating swing."),
+    "elo_k": (32, 1, 500, "Legend MMR", "MMR swing (K)", ""),
+    "elo_scale": (400, 10, 10_000, "Legend MMR", "MMR gap scale", ""),
+    "start_mmr": (1500, 0, 10_000, "Legend MMR", "Starting MMR", "Given when a player enters Legend Division."),
+    "daily_rp": (5, 0, 10_000, "Daily reward", "RP per streak day", "Day N pays N x this."),
+    "daily_mmr": (1, 0, 1000, "Daily reward", "MMR per streak day (legends)", ""),
+    "daily_cycle": (7, 1, 365, "Daily reward", "Streak cycle (days)", "After this many days the reward starts over at day 1."),
+    "match_ttl_hours": (24, 1, 24 * 30, "Matches", "Match expiry (hours)", "Unfinished matchmade games are resolved after this: no-shows forfeit."),
+    "lobby_max": (20, 2, 200, "Matches", "Max players in an old free-for-all lobby", ""),
+    "login_max_fails": (10, 1, 1000, "Security", "Failed logins before lockout", "Per IP address."),
+    "login_window_min": (15, 1, 1440, "Security", "Lockout window (minutes)", ""),
+    "session_days": (30, 1, 365, "Security", "Stay logged in (days)", ""),
+    "report_daily_limit": (10, 1, 1000, "Security", "Reports per player per day", ""),
+    "search_radius_km": (11, 1, 500, "Locations", "Spread around each area (km)", "Rounds land up to this far from an area's centre."),
+    "mode_ranked": (True, None, None, "Modes & features", "Ranked duels", ""),
+    "mode_legend": (True, None, None, "Modes & features", "Legend Division", "Off: Master players can't enter (existing legends keep playing)."),
+    "mode_1v1": (True, None, None, "Modes & features", "Duel matchmaking", ""),
+    "mode_2v2": (True, None, None, "Modes & features", "Team duel matchmaking", ""),
+    "mode_private": (True, None, None, "Modes & features", "Private lobbies", ""),
+    "mode_practice": (True, None, None, "Modes & features", "Practice", ""),
+    "daily_enabled": (True, None, None, "Modes & features", "Daily rewards", ""),
+    "reports_enabled": (True, None, None, "Modes & features", "Player reports", ""),
+    "maintenance": (False, None, None, "Modes & features", "Maintenance mode", "Only admins can start new games. Games in progress can finish."),
+}
 REPORT_REASONS = {"cheating": "Cheating", "name": "Offensive username", "abuse": "Harassment or abuse", "other": "Other"}
 SEATS = {"ranked": 2, "legend": 2, "1v1": 2, "2v2": 4}  # players per match; private lobbies are full by the time they start
 DAILY_CYCLE = 7  # daily reward grows for 7 straight days, then the cycle restarts
@@ -60,6 +92,7 @@ CREATE TABLE IF NOT EXISTS lobby_members(lobby_id INTEGER NOT NULL REFERENCES lo
 CREATE TABLE IF NOT EXISTS reports(id INTEGER PRIMARY KEY, reporter_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
   target_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, reason TEXT NOT NULL, details TEXT, lobby_code TEXT,
   created REAL, status TEXT NOT NULL DEFAULT 'open', resolved_by TEXT, resolved_at REAL);
+CREATE TABLE IF NOT EXISTS admin_log(id INTEGER PRIMARY KEY, ts REAL, admin TEXT, action TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS lobby_rounds(lobby_id INTEGER NOT NULL REFERENCES lobbies(id) ON DELETE CASCADE, n INTEGER NOT NULL,
   image_id TEXT, lat REAL, lng REAL, PRIMARY KEY(lobby_id, n));
 """
@@ -80,6 +113,8 @@ MIGRATIONS = [
     # v0.5: cheats became admin-only; clear any that were handed to regular players
     ("users", "cheats_admin_only", "INTEGER NOT NULL DEFAULT 1",
      "UPDATE users SET cheat_reveal=0, cheat_aim=0, cheat_shield=0, cheat_floor=0, cheat_multiplier=1 WHERE is_admin=0"),
+    ("games", "rounds", "INTEGER NOT NULL DEFAULT 5"),  # v0.6: rounds are configurable, fixed per game/lobby
+    ("lobbies", "rounds", "INTEGER NOT NULL DEFAULT 5"),
 ]
 
 
@@ -118,6 +153,55 @@ def set_setting(key, value):
         c.execute("INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
 
+def cfg(key):
+    default, lo, hi = CONFIG[key][:3]
+    raw = setting("cfg_" + key, None)
+    if raw is None:
+        return default
+    return raw == "1" if isinstance(default, bool) else type(default)(raw)
+
+
+def parse_cfg(key, v):
+    default, lo, hi, *_ = CONFIG[key]
+    if isinstance(default, bool):
+        return "1" if v in (True, 1, "1", "true", "on") else "0"
+    try:
+        v = type(default)(v)
+    except (TypeError, ValueError):
+        raise Err(400, f"{CONFIG[key][4]}: not a number")
+    if not (lo <= v <= hi and math.isfinite(v)):
+        raise Err(400, f"{CONFIG[key][4]} must be between {lo} and {hi}")
+    return str(v)
+
+
+def ranks():
+    return [(0, "Bronze")] + [(cfg("rank_" + n.lower()), n) for n in RANK_NAMES[1:]]
+
+
+def legend_rp():
+    return cfg("rank_master")
+
+
+def seeds():
+    """Areas rounds are drawn around. Admin-editable; falls back to the built-in world list."""
+    raw = setting("seeds", "")
+    return [tuple(x) for x in json.loads(raw)] if raw else SEEDS
+
+
+def audit(c, admin, action, detail=""):
+    c.execute("INSERT INTO admin_log(ts,admin,action,detail) VALUES(?,?,?,?)", (time.time(), admin["username"], action, str(detail)[:500]))
+
+
+def require(flag, what):
+    if not cfg(flag):
+        raise Err(403, f"{what} is turned off by the admin")
+
+
+def playable(u):
+    if cfg("maintenance") and not u["is_admin"]:
+        raise Err(503, "The game is in maintenance. Check back soon!")
+
+
 def hash_pw(pw, salt=None):
     salt = salt or secrets.token_hex(16)
     return f"{salt}${hashlib.pbkdf2_hmac('sha256', pw.encode(), salt.encode(), 200_000).hex()}"
@@ -140,7 +224,7 @@ def bounded(v, lo, hi, what):
 
 
 def rank_name(rp):
-    return [name for floor, name in RANKS if rp >= floor][-1]
+    return [name for floor, name in ranks() if rp >= floor][-1]
 
 
 CHEAT_OFF = {"cheat_reveal": 0, "cheat_aim": 0, "cheat_shield": 0, "cheat_floor": 0, "cheat_multiplier": 1}
@@ -164,14 +248,15 @@ def haversine_km(lat1, lng1, lat2, lng2):
 
 
 def score_for(km):
-    return round(1000 * math.exp(-km / 1200))  # 1000 = spot on, ~430 at 1000 km, ~0 past 8000 km
+    return round(cfg("max_round_score") * math.exp(-km / cfg("score_falloff_km")))  # defaults: 1000 spot on, ~430 at 1000 km
 
 
 def pick_location(token):
     """Return (image_id, lat, lng) of a random Mapillary image near a seed city."""
     for _ in range(15):
-        lat, lng = random.choice(SEEDS)
-        lat, lng, d = lat + random.uniform(-0.1, 0.1), lng + random.uniform(-0.1, 0.1), 0.02
+        lat, lng = random.choice(seeds())
+        spread = cfg("search_radius_km") / 111  # degrees
+        lat, lng, d = lat + random.uniform(-spread, spread), lng + random.uniform(-spread, spread), 0.02
         q = urllib.parse.urlencode({"access_token": token, "fields": "id,geometry,is_pano", "limit": 20,
                                     "bbox": f"{lng - d},{lat - d},{lng + d},{lat + d}"})
         try:
@@ -197,10 +282,10 @@ def new_session(h, uid):
     now = time.time()
     with db() as c:
         c.execute("DELETE FROM sessions WHERE expires<?", (now,))
-        c.execute("INSERT INTO sessions VALUES(?,?,?)", (tok, uid, now + SESSION_SECS))
+        c.execute("INSERT INTO sessions VALUES(?,?,?)", (tok, uid, now + cfg("session_days") * 86400))
         c.execute("UPDATE users SET last_login=?, last_ip=? WHERE id=?", (now, h.client_ip(), uid))
     secure = "; Secure" if h.headers.get("X-Forwarded-Proto") == "https" else ""
-    return {"ok": True}, f"{COOKIE}={tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_SECS}{secure}"
+    return {"ok": True}, f"{COOKIE}={tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age={cfg("session_days") * 86400}{secure}"
 
 
 def api_register(h, b):
@@ -221,10 +306,10 @@ _fails, _fails_lock = {}, threading.Lock()  # shortcut: in-memory, resets on res
 def login_throttle(ip, failed=False):
     now = time.time()
     with _fails_lock:
-        recent = [t for t in _fails.get(ip, []) if t > now - LOGIN_WINDOW] + ([now] if failed else [])
+        recent = [t for t in _fails.get(ip, []) if t > now - cfg("login_window_min") * 60] + ([now] if failed else [])
         _fails[ip] = recent
-    if not failed and len(recent) >= LOGIN_MAX_FAILS:
-        raise Err(429, "Too many failed logins. Try again in 15 minutes.")
+    if not failed and len(recent) >= cfg("login_max_fails"):
+        raise Err(429, f"Too many failed logins. Try again in {cfg('login_window_min')} minutes.")
 
 
 def api_login(h, b):
@@ -256,7 +341,9 @@ def api_logout(h, b):
 
 def api_me(h, b):
     u = h.user()
-    nxt = next((floor for floor, _ in RANKS if floor > u["rank_points"]), None)
+    rk = ranks()
+    nxt = next((floor for floor, _ in rk if floor > u["rank_points"]), None)
+    floor = [f for f, _ in rk if f <= u["rank_points"]][-1]
     today = utc_today()
     claimed = u["daily_last"] == today.isoformat()
     return {"username": u["username"], "is_admin": bool(u["is_admin"]),
@@ -265,8 +352,21 @@ def api_me(h, b):
             "daily_available": not claimed,
             "daily_next": daily_reward(u["daily_streak"] + 1 if claimed else next_streak(u, today), u["legend"]),
             "daily_streak": u["daily_streak"] if u["daily_last"] in (today.isoformat(), str(today - datetime.timedelta(days=1))) else 0,
-            "rank": rank_name(u["rank_points"]), "rank_points": u["rank_points"], "next_rank_at": nxt,
-            "legend": bool(u["legend"]), "legend_eligible": u["rank_points"] >= LEGEND_RP, "mmr": round(u["mmr"])}
+            "daily_track": [daily_reward(d, u["legend"])["amount"] for d in range(1, cfg("daily_cycle") + 1)],
+            "rank": rank_name(u["rank_points"]), "rank_points": u["rank_points"], "next_rank_at": nxt, "rank_floor": floor,
+            "legend": bool(u["legend"]), "legend_eligible": u["rank_points"] >= legend_rp() and cfg("mode_legend"),
+            "mmr": round(u["mmr"]), "server": status()}
+
+
+def status():
+    return {"announcement": setting("announcement"), "maintenance": cfg("maintenance"), "rounds": cfg("rounds"), "max_round_score": cfg("max_round_score"), "registration_open": setting("registration_open") == "1",
+            "modes": {k[5:]: cfg(k) for k in CONFIG if k.startswith("mode_")},
+            "daily_enabled": cfg("daily_enabled"), "reports_enabled": cfg("reports_enabled")}
+
+
+def api_status(h, b):
+    """Public: what the login page needs to know."""
+    return status()
 
 
 def game_state(u, gid):
@@ -277,7 +377,7 @@ def game_state(u, gid):
     played = c.execute("""SELECT n, score, distance, lat, lng, guess_lat, guess_lng FROM rounds
         WHERE game_id=? AND score IS NOT NULL ORDER BY n""", (gid,)).fetchall()  # only finished rounds, so no answers leak
     lb = c.execute("SELECT code, mode FROM lobbies WHERE id=?", (g["lobby_id"],)).fetchone() if g["lobby_id"] else None
-    state = {"id": g["id"], "rounds": ROUNDS, "lobby": lb["code"] if lb else None, "mode": lb["mode"] if lb else "solo", "total": g["total"], "done": bool(g["done"]),
+    state = {"id": g["id"], "rounds": g["rounds"], "lobby": lb["code"] if lb else None, "mode": lb["mode"] if lb else "solo", "total": g["total"], "done": bool(g["done"]),
              "history": [dict(r) for r in played], "token": setting("mapillary_token")}
     if g["done"]:
         return state
@@ -303,10 +403,12 @@ def lobby_location(c, lobby_id, n, token):
 
 def api_new_game(h, b):
     u = h.user()
+    require("mode_practice", "Practice")
+    playable(u)
     if not setting("mapillary_token"):
         raise Err(503, "The admin has not set a Mapillary token yet")
     with db() as c:
-        gid = c.execute("INSERT INTO games(user_id, started) VALUES(?,?)", (u["id"], time.time())).lastrowid
+        gid = c.execute("INSERT INTO games(user_id, started, rounds) VALUES(?,?,?)", (u["id"], time.time(), cfg("rounds"))).lastrowid
     return game_state(u, gid)
 
 
@@ -315,7 +417,7 @@ def api_game(h, b, gid):
 
 
 def open_round(u, gid):
-    r = db().execute("SELECT r.* FROM rounds r JOIN games g ON g.id=r.game_id WHERE g.id=? AND g.user_id=? AND r.score IS NULL",
+    r = db().execute("SELECT r.*, g.rounds FROM rounds r JOIN games g ON g.id=r.game_id WHERE g.id=? AND g.user_id=? AND r.score IS NULL",
                      (int(gid), u["id"])).fetchone()
     if not r:
         raise Err(409, "No open round")
@@ -331,7 +433,7 @@ def api_guess(h, b, gid):
     r = open_round(u, gid)
     km = haversine_km(lat, lng, r["lat"], r["lng"])
     s = round(max(score_for(km), cheat(u, "cheat_floor")) * cheat(u, "cheat_multiplier"))  # cheats apply in every mode
-    done = r["n"] >= ROUNDS
+    done = r["n"] >= r["rounds"]
     with db() as c:
         if c.execute("UPDATE rounds SET guess_lat=?, guess_lng=?, distance=?, score=? WHERE game_id=? AND n=? AND score IS NULL",
                      (lat, lng, km, s, r["game_id"], r["n"])).rowcount != 1:
@@ -350,11 +452,12 @@ def rating_delta(mode, res, me, opp, margin, shield):
     res: 1 win / 0.5 draw / 0 loss. me/opp: users rows. margin: 0..1 (1 = blowout)."""
     legend = mode == "legend"
     mine, theirs = (me["mmr"], opp["mmr"]) if legend else (me["rank_points"], opp["rank_points"])
-    expected = 1 / (1 + 10 ** ((theirs - mine) / (ELO_SCALE if legend else RP_SCALE)))
-    delta = (ELO_K if legend else RP_K) * (1 + margin) * (res - expected)
+    expected = 1 / (1 + 10 ** ((theirs - mine) / cfg("elo_scale" if legend else "rp_scale")))
+    delta = cfg("elo_k" if legend else "rp_k") * (1 + margin) * (res - expected)
     if not legend:
-        delta = round(max(-RP_CAP, min(RP_CAP, delta)))
-        delta = max(delta, 5) if res == 1 else min(delta, -5) if res == 0 else delta  # a result always moves you a bit
+        cap, least = cfg("rp_cap"), min(cfg("rp_min"), cfg("rp_cap"))
+        delta = round(max(-cap, min(cap, delta)))
+        delta = max(delta, least) if res == 1 else min(delta, -least) if res == 0 else delta  # a result always moves you a bit
         delta = max(delta, -me["rank_points"])  # RP never goes below 0
     if shield:
         delta = max(delta, 0)
@@ -391,15 +494,19 @@ def settle(c, lobby_id, force=False):
         delta = None
         if lb["mode"] in ("ranked", "legend"):
             opp = next(y for y in p if y["id"] != x["id"])
-            margin = min(abs(x["total"] - opp["total"]) / BLOWOUT, 1)
+            margin = min(abs(x["total"] - opp["total"]) / cfg("blowout"), 1)
             delta = rating_delta(lb["mode"], res, x, opp, margin, cheat(x, "cheat_shield"))
             col = "mmr" if lb["mode"] == "legend" else "rank_points"
             c.execute(f"UPDATE users SET {col}={col}+? WHERE id=?", (delta, x["id"]))
         c.execute("UPDATE lobby_members SET result=?, delta=? WHERE lobby_id=? AND user_id=?", (res, delta, lobby_id, x["id"]))
 
 
+def match_ttl():
+    return cfg("match_ttl_hours") * 3600
+
+
 def expire_stale(c):
-    for (lid,) in c.execute("SELECT id FROM lobbies WHERE matchmade=1 AND settled=0 AND created<?", (time.time() - MATCH_TTL,)).fetchall():
+    for (lid,) in c.execute("SELECT id FROM lobbies WHERE matchmade=1 AND settled=0 AND created<?", (time.time() - match_ttl(),)).fetchall():
         settle(c, lid, force=True)
 
 
@@ -409,6 +516,8 @@ def api_queue(h, b):
     mode = b.get("mode")
     if mode not in ("ranked", "1v1", "2v2"):
         raise Err(400, "Mode must be ranked, 1v1 or 2v2")
+    require("mode_" + mode, {"ranked": "Ranked", "1v1": "Duel matchmaking", "2v2": "Team duel matchmaking"}[mode])
+    playable(u)
     if not setting("mapillary_token"):
         raise Err(503, "The admin has not set a Mapillary token yet")
     if mode == "ranked" and u["legend"]:
@@ -449,12 +558,13 @@ def next_streak(u, today):
 
 
 def daily_reward(streak, legend):
-    day = (streak - 1) % DAILY_CYCLE + 1
-    return {"day": day, "amount": day if legend else 5 * day, "unit": "MMR" if legend else "RP"}  # legends get a small MMR bump
+    day = (streak - 1) % cfg("daily_cycle") + 1
+    return {"day": day, "amount": day * cfg("daily_mmr" if legend else "daily_rp"), "unit": "MMR" if legend else "RP"}
 
 
 def api_daily(h, b):
     u, today = h.user(), utc_today()
+    require("daily_enabled", "Daily rewards")
     streak = next_streak(u, today)
     reward = daily_reward(streak, u["legend"])
     col = "mmr" if u["legend"] else "rank_points"
@@ -468,10 +578,11 @@ def api_daily(h, b):
 
 def api_legend_enter(h, b):
     u = h.user()
-    if u["rank_points"] < LEGEND_RP:
-        raise Err(403, f"Reach {RANKS[-1][1]} ({LEGEND_RP} RP) to enter Legend Division")
+    require("mode_legend", "Legend Division")
+    if u["rank_points"] < legend_rp():
+        raise Err(403, f"Reach Master ({legend_rp()} RP) to enter Legend Division")
     with db() as c:
-        c.execute("UPDATE users SET legend=1, mmr=? WHERE id=? AND legend=0", (START_MMR, u["id"]))
+        c.execute("UPDATE users SET legend=1, mmr=? WHERE id=? AND legend=0", (cfg("start_mmr"), u["id"]))
     return {"ok": True}
 
 
@@ -534,6 +645,7 @@ def api_profile(h, b, name):
 
 def api_report(h, b):
     u = h.user()
+    require("reports_enabled", "Reporting")
     t = db().execute("SELECT id, username FROM users WHERE username=?", (str(b.get("username")),)).fetchone()
     if not t:
         raise Err(404, "No such player")
@@ -545,7 +657,7 @@ def api_report(h, b):
     c = db()
     if c.execute("SELECT 1 FROM reports WHERE reporter_id=? AND target_id=? AND status='open'", (u["id"], t["id"])).fetchone():
         raise Err(409, f"You already have an open report on {t['username']}")
-    if c.execute("SELECT COUNT(*) FROM reports WHERE reporter_id=? AND created>?", (u["id"], time.time() - 86400)).fetchone()[0] >= 10:
+    if c.execute("SELECT COUNT(*) FROM reports WHERE reporter_id=? AND created>?", (u["id"], time.time() - 86400)).fetchone()[0] >= cfg("report_daily_limit"):
         raise Err(429, "You've sent a lot of reports today. Try again tomorrow.")
     with c:
         c.execute("INSERT INTO reports(reporter_id,target_id,reason,details,lobby_code,created) VALUES(?,?,?,?,?,?)",
@@ -565,13 +677,16 @@ def api_admin_reports(h, b):
 def api_admin_report(h, b):
     me = h.user(admin=True)
     action = b.get("action")
-    if action not in ("resolve", "dismiss", "ban"):
+    if action not in ("resolve", "dismiss", "ban", "delete"):
         raise Err(400, "Unknown action")
     r = db().execute("SELECT * FROM reports WHERE id=?", (int(b["id"]),)).fetchone()
     if not r:
         raise Err(404, "No such report")
     with db() as c:
-        if action == "ban":
+        audit(c, me, "report_" + action, f"report #{r['id']}")
+        if action == "delete":
+            c.execute("DELETE FROM reports WHERE id=?", (r["id"],))
+        elif action == "ban":
             if r["target_id"] == me["id"]:
                 raise Err(400, "You can't ban yourself")
             c.execute("UPDATE users SET banned=1 WHERE id=?", (r["target_id"],))
@@ -622,7 +737,7 @@ def lobby_state(u, code):
         if r["team"]:
             teams[r["team"]] = teams.get(r["team"], 0) + r["total"]
     return {"code": lb["code"], "mode": lb["mode"], "started": bool(lb["started"]), "is_host": lb["host_id"] == u["id"],
-            "rounds": ROUNDS, "teams": teams, "my_team": me["team"], "my_done": bool(me["done"]),
+            "rounds": lb["rounds"], "teams": teams, "my_team": me["team"], "my_done": bool(me["done"]),
             "finished": bool(lb["started"]) and all(r["done"] for r in rows) and len(rows) == SEATS.get(lb["mode"], len(rows)),
             "seats": SEATS.get(lb["mode"]),
             "matchmade": bool(lb["matchmade"]), "settled": bool(lb["settled"]), "my_result": me["result"],
@@ -635,6 +750,8 @@ def api_lobby_create(h, b):
     mode = b.get("mode")
     if mode not in ("1v1", "2v2"):
         raise Err(400, "Mode must be 1v1 or 2v2")
+    require("mode_private", "Private lobbies")
+    playable(u)
     with db() as c:
         code = new_lobby(c, u["id"], mode)
     return lobby_state(u, code)
@@ -645,8 +762,8 @@ def new_lobby(c, host_id, mode, matchmade=0):
     for _ in range(5):
         code = "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(6))
         try:
-            lid = c.execute("INSERT INTO lobbies(code,mode,host_id,started,matchmade,created) VALUES(?,?,?,?,?,?)",
-                            (code, mode, host_id, matchmade, matchmade, time.time())).lastrowid
+            lid = c.execute("INSERT INTO lobbies(code,mode,host_id,started,matchmade,created,rounds) VALUES(?,?,?,?,?,?,?)",
+                            (code, mode, host_id, matchmade, matchmade, time.time(), cfg("rounds"))).lastrowid
             break
         except sqlite3.IntegrityError:
             continue
@@ -657,6 +774,7 @@ def new_lobby(c, host_id, mode, matchmade=0):
 def api_lobby_join(h, b):
     """Join a lobby, or (2v2) switch team. Only before the host starts it."""
     u, lb = h.user(), get_lobby(b.get("code", ""))
+    playable(u)
     if lb["matchmade"]:
         raise Err(403, "Matchmade games can only be joined through matchmaking")
     if lb["started"]:
@@ -671,7 +789,7 @@ def api_lobby_join(h, b):
             raise Err(400, "Team must be A or B")
         if counts[team] >= 2:
             raise Err(409, f"Team {team} is full")
-    elif len(others) >= (2 if lb["mode"] == "1v1" else 20):  # others excludes the joiner
+    elif len(others) >= (2 if lb["mode"] == "1v1" else cfg("lobby_max")):  # others excludes the joiner
         raise Err(409, "Lobby is full")
     with c:
         c.execute("INSERT INTO lobby_members(lobby_id,user_id,team) VALUES(?,?,?) ON CONFLICT(lobby_id,user_id) DO UPDATE SET team=excluded.team",
@@ -702,10 +820,12 @@ def api_lobby_play(h, b, code):
     st, lb = lobby_state(u, code), get_lobby(code)  # lobby_state checks membership
     if not st["started"]:
         raise Err(409, "The host hasn't started yet")
+    if not db().execute("SELECT 1 FROM games WHERE lobby_id=? AND user_id=?", (lb["id"], u["id"])).fetchone():
+        playable(u)  # maintenance blocks new games, not ones already underway
     if not setting("mapillary_token"):
         raise Err(503, "The admin has not set a Mapillary token yet")
     with db() as c:
-        c.execute("INSERT OR IGNORE INTO games(user_id, started, lobby_id) VALUES(?,?,?)", (u["id"], time.time(), lb["id"]))
+        c.execute("INSERT OR IGNORE INTO games(user_id, started, lobby_id, rounds) VALUES(?,?,?,?)", (u["id"], time.time(), lb["id"], lb["rounds"]))
         gid = c.execute("SELECT id FROM games WHERE lobby_id=? AND user_id=?", (lb["id"], u["id"])).fetchone()["id"]
     return game_state(u, gid)
 
@@ -731,16 +851,18 @@ def api_admin_users(h, b):
         (SELECT COUNT(*) FROM sessions s WHERE s.user_id=u.id AND s.expires>?) sessions
         FROM users u LEFT JOIN games g ON g.user_id=u.id GROUP BY u.id ORDER BY u.id""", (time.time(),)).fetchall()
     return {"users": [dict(r) | {"rank": "Legend" if r["legend"] else rank_name(r["rank_points"])} for r in rows],
-            "ranks": [{"name": n, "rp": rp} for rp, n in RANKS]}
+            "ranks": [{"name": n, "rp": rp} for rp, n in ranks()], "danger": DANGER}
 
 
 def api_admin_user(h, b):
     me = h.user(admin=True)
     uid, action = int(b["id"]), b.get("action")
-    if not db().execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
+    target = db().execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
+    if not target:
         raise Err(404, "No such user")
     self_edit = uid == me["id"]
     with db() as c:
+        audit(c, me, action, f"{target['username']} " + (json.dumps(b.get("fields")) if action == "update" else ""))
         if action == "delete":
             if self_edit:
                 raise Err(400, "You can't delete yourself")
@@ -776,6 +898,7 @@ ADMIN_FIELDS = {  # column -> validator; keys are fixed, so safe to put in SQL
     "username": valid_username, "is_admin": flag, "banned": flag, "legend": flag,
     "rank_points": lambda v: bounded(int(v), 0, 100_000, "RP"),
     "mmr": lambda v: bounded(float(v), 0, 10_000, "MMR"),
+    "daily_streak": lambda v: bounded(int(v), 0, 100_000, "Streak"),
 }
 CHEAT_FIELDS = {
     "cheat_reveal": flag, "cheat_aim": flag, "cheat_shield": flag,
@@ -785,11 +908,147 @@ CHEAT_FIELDS = {
 
 
 def api_admin_settings(h, b):
-    h.user(admin=True)
+    me = h.user(admin=True)
     if h.command == "POST":
-        set_setting("mapillary_token", str(b.get("mapillary_token", "")).strip())
-        set_setting("registration_open", "1" if b.get("registration_open") else "0")
-    return {"mapillary_token": setting("mapillary_token"), "registration_open": setting("registration_open") == "1"}
+        for key in ("mapillary_token", "announcement"):
+            if key in b:
+                set_setting(key, str(b[key]).strip()[:500])
+        if "registration_open" in b:
+            set_setting("registration_open", "1" if b["registration_open"] else "0")
+        with db() as c:
+            audit(c, me, "settings", ", ".join(k for k in b if k != "mapillary_token") + (" token" if "mapillary_token" in b else ""))
+    return {"mapillary_token": setting("mapillary_token"), "registration_open": setting("registration_open") == "1",
+            "announcement": setting("announcement")}
+
+
+def api_admin_config(h, b):
+    """All game rules, generated from CONFIG so every rule shows up in the admin panel automatically."""
+    me = h.user(admin=True)
+    if h.command == "POST":
+        vals = b.get("values") or {}
+        unknown = set(vals) - set(CONFIG)
+        if unknown:
+            raise Err(400, f"Unknown setting: {', '.join(sorted(unknown))}")
+        parsed = {k: parse_cfg(k, v) for k, v in vals.items()}
+        # rank thresholds must still climb Silver < Gold < ... < Master
+        floors = [int(parsed.get(k, cfg(k))) for k in ("rank_silver", "rank_gold", "rank_platinum", "rank_diamond", "rank_master")]
+        if floors != sorted(set(floors)):
+            raise Err(400, "Rank thresholds must go up: Silver < Gold < Platinum < Diamond < Master")
+        with db() as c:
+            for k, v in parsed.items():
+                c.execute("INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", ("cfg_" + k, v))
+            if parsed:
+                audit(c, me, "game_rules", ", ".join(f"{k}={v}" for k, v in parsed.items()))
+    return {"rules": [{"key": k, "value": cfg(k), "default": d, "min": lo, "max": hi, "group": g, "label": label, "help": hlp,
+                       "type": "bool" if isinstance(d, bool) else type(d).__name__}
+                      for k, (d, lo, hi, g, label, hlp) in CONFIG.items()]}
+
+
+def api_admin_locations(h, b):
+    me = h.user(admin=True)
+    if h.command == "POST":
+        if b.get("reset"):
+            set_setting("seeds", "")
+        else:
+            pts = []
+            for i, line in enumerate(str(b.get("text", "")).splitlines(), 1):
+                line = line.split("#")[0].strip()
+                if not line:
+                    continue
+                try:
+                    lat, lng = (float(x) for x in line.replace(";", ",").split(",")[:2])
+                except ValueError:
+                    raise Err(400, f"Line {i}: write it as latitude, longitude")
+                if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+                    raise Err(400, f"Line {i}: coordinates out of range")
+                pts.append([round(lat, 5), round(lng, 5)])
+            if not pts:
+                raise Err(400, "Add at least one area")
+            set_setting("seeds", json.dumps(pts))
+        with db() as c:
+            audit(c, me, "locations", "reset to default" if b.get("reset") else f"{len(seeds())} areas")
+    return {"text": "\n".join(f"{lat}, {lng}" for lat, lng in seeds()), "count": len(seeds()), "custom": bool(setting("seeds"))}
+
+
+def api_admin_matches(h, b):
+    h.user(admin=True)
+    c = db()
+    with c:
+        expire_stale(c)
+    lbs = c.execute("""SELECT l.*, hu.username host FROM lobbies l LEFT JOIN users hu ON hu.id=l.host_id
+        ORDER BY l.settled, l.id DESC LIMIT 300""").fetchall()
+    out = []
+    for lb in lbs:
+        ms = c.execute("""SELECT u.username, m.team, m.delta, m.result, COALESCE(g.total,0) total, COALESCE(g.done,0) done,
+            (SELECT COUNT(*) FROM rounds r WHERE r.game_id=g.id AND r.score IS NOT NULL) played
+            FROM lobby_members m JOIN users u ON u.id=m.user_id LEFT JOIN games g ON g.lobby_id=m.lobby_id AND g.user_id=m.user_id
+            WHERE m.lobby_id=? ORDER BY m.team, total DESC""", (lb["id"],)).fetchall()
+        out.append({k: lb[k] for k in ("code", "mode", "started", "settled", "matchmade", "created", "rounds", "host")}
+                   | {"seats": SEATS.get(lb["mode"]), "members": [dict(m) for m in ms]})
+    return {"matches": out}
+
+
+def api_admin_match(h, b):
+    """end: resolve it now (no-shows forfeit). void: undo its RP/MMR changes and delete it with its games."""
+    me = h.user(admin=True)
+    lb = get_lobby(b.get("code", ""))
+    action = b.get("action")
+    with db() as c:
+        if action == "end":
+            settle(c, lb["id"], force=True)
+        elif action == "void":
+            col = "mmr" if lb["mode"] == "legend" else "rank_points"
+            for m in c.execute("SELECT user_id, delta FROM lobby_members WHERE lobby_id=? AND delta IS NOT NULL", (lb["id"],)).fetchall():
+                c.execute(f"UPDATE users SET {col}=MAX(0, {col}-?) WHERE id=?", (m["delta"], m["user_id"]))
+            c.execute("DELETE FROM games WHERE lobby_id=?", (lb["id"],))
+            c.execute("DELETE FROM lobbies WHERE id=?", (lb["id"],))
+        else:
+            raise Err(400, "Unknown action")
+        audit(c, me, "match_" + action, lb["code"])
+    return {"ok": True}
+
+
+def api_admin_create(h, b):
+    me = h.user(admin=True)
+    name, pw = valid_username(b.get("username")), valid_password(b.get("password"))
+    try:
+        with db() as c:
+            c.execute("INSERT INTO users(username,pw,is_admin,created) VALUES(?,?,?,?)", (name, hash_pw(pw), flag(b.get("is_admin")), time.time()))
+            audit(c, me, "create", name + (" (admin)" if b.get("is_admin") else ""))
+    except sqlite3.IntegrityError:
+        raise Err(409, "Username taken")
+    return {"ok": True}
+
+
+DANGER = {
+    "season_reset": "Everyone's RP back to 0, out of Legend Division, MMR back to the start value",
+    "wipe_matches": "Delete every game and match (all modes), including history",
+    "wipe_reports": "Delete every report",
+}
+
+
+def api_admin_danger(h, b):
+    me = h.user(admin=True)
+    action = b.get("action")
+    if action not in DANGER:
+        raise Err(400, "Unknown action")
+    if b.get("confirm") != action:
+        raise Err(400, "Type the action name to confirm")
+    with db() as c:
+        if action == "season_reset":
+            c.execute("UPDATE users SET rank_points=0, legend=0, mmr=?", (cfg("start_mmr"),))
+        elif action == "wipe_matches":
+            c.execute("DELETE FROM lobbies")
+            c.execute("DELETE FROM games")
+        else:
+            c.execute("DELETE FROM reports")
+        audit(c, me, action)
+    return {"ok": True}
+
+
+def api_admin_log(h, b):
+    h.user(admin=True)
+    return {"log": [dict(r) for r in db().execute("SELECT * FROM admin_log ORDER BY id DESC LIMIT 500")]}
 
 
 ROUTES = [
@@ -804,6 +1063,16 @@ ROUTES = [
     ("GET", r"/api/game/(\d+)/peek", api_peek),
     ("GET", r"/api/lobbies", api_my_lobbies),
     ("POST", r"/api/queue", api_queue),
+    ("GET", r"/api/status", api_status),
+    ("GET", r"/api/admin/config", api_admin_config),
+    ("POST", r"/api/admin/config", api_admin_config),
+    ("GET", r"/api/admin/locations", api_admin_locations),
+    ("POST", r"/api/admin/locations", api_admin_locations),
+    ("GET", r"/api/admin/matches", api_admin_matches),
+    ("POST", r"/api/admin/match", api_admin_match),
+    ("POST", r"/api/admin/create", api_admin_create),
+    ("POST", r"/api/admin/danger", api_admin_danger),
+    ("GET", r"/api/admin/log", api_admin_log),
     ("POST", r"/api/password", api_password),
     ("GET", r"/api/ranked-board", api_ranked_board),
     ("GET", r"/api/profile/([A-Za-z0-9_.-]{3,20})", api_profile),
