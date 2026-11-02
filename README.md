@@ -1,6 +1,6 @@
 # Better Guesser for YunoHost
 
-A self-hosted geography guessing game on real street-level imagery. Players are dropped somewhere in the world, look around, and pin their guess on a map. It's a YunoHost package with no dependencies beyond `python3`: a single-file Python server, SQLite, and one HTML page.
+A self-hosted geography guessing game on **Google Street View**. Players are dropped somewhere in the world, look around, and pin their guess on a map. It's a YunoHost package with no dependencies beyond `python3`: a single-file Python server, SQLite, and one HTML page.
 
 ## Install
 
@@ -8,11 +8,21 @@ A self-hosted geography guessing game on real street-level imagery. Players are 
 sudo yunohost app install https://github.com/gzplaz/better-guesser
 ```
 
-The install asks for:
-- the game admin's username and password
-- a **Mapillary client token**, which is free: create an app at https://www.mapillary.com/dashboard/developers and copy its *Client Token*. You can skip this at install and paste it later in **Admin → Settings**.
+The install asks for the game admin's username and password, and a **Google Maps API key**. You can skip the key at install and paste it later in **Admin → Settings**.
 
 Leave the access permission on `visitors` so friends can sign up in the game itself, without YunoHost accounts. Install, upgrade, backup, restore, change URL and remove are all supported. Upgrades migrate the database automatically and keep every account and score.
+
+### Getting a Google Maps API key
+
+1. Go to https://console.cloud.google.com/google/maps-apis and create a project. Google requires a billing account on it.
+2. Enable the **Maps JavaScript API** (the Street View viewer players see) and the **Street View Static API** (the server uses its free metadata lookup to pick places).
+3. Under **APIs & Services → Credentials**, create an API key and paste it into the install, or into Admin → Settings.
+
+The key ends up in players' browsers, which is how Google Maps works, so **restrict it**:
+- Under *Website restrictions*, allow `https://your.domain/*`.
+- Google refuses website-restricted keys for server-side calls. So create a **second key** restricted by *IP address* to your server, limit it to the Street View Static API, and paste it into **Server key** in Admin → Settings. If you leave Server key empty, the server uses the main key.
+
+**Cost:** Google bills each Street View viewer load beyond a free monthly allowance; each round is one load. Check your current allowance on Google's pricing page, and set a quota cap in the Cloud console so a busy weekend can't surprise you. The server's location lookups use the metadata endpoint, which Google doesn't charge for.
 
 ## Game modes
 
@@ -56,7 +66,7 @@ Log in as an admin and open **Admin** from the account menu. The admin panel con
   - match expiry, login lockout, session length, and the daily report limit
 - **Modes & features** (also under Game rules): switch ranked, Legend Division, duel and team-duel matchmaking, private lobbies, practice, daily rewards and reports on or off. **Maintenance mode** lets only admins start games, while games already in progress can finish.
 - **Locations**: the list of areas rounds are drawn from (latitude, longitude per line), and how far from each area's centre a round can land. One click returns to the built-in world list.
-- **Settings**: the announcement banner (shown to everyone, including on the login page), the Mapillary token, and whether sign-ups are open.
+- **Settings**: the announcement banner (shown to everyone, including on the login page), the Google Maps API key (plus an optional server key), and whether sign-ups are open.
   - The **Danger zone** can reset the season (all RP, Legend status and MMR), wipe all matches, or wipe all reports. Each needs you to type the action's name to confirm.
 - **My cheats**: admin-only, and they apply only to your own account, in every mode. Nobody can switch cheats on for someone else, and demoting an admin switches their cheats off.
   - **Peek**: an eye button shows a small dot on the real location.
@@ -69,6 +79,6 @@ Log in as an admin and open **Admin** from the account menu. The admin panel con
 ## Layout
 
 - `src/app.py`: the server (Python stdlib, SQLite in the app's data dir)
-- `src/index.html`: the whole frontend (Leaflet + MapillaryJS from CDN)
+- `src/index.html`: the whole frontend (Leaflet for the guess map, Google Maps JS for Street View)
 - `scripts/`, `conf/`, `manifest.toml`: YunoHost packaging (v2, helpers 2.1)
 - `tests/test_app.py`: an end-to-end self-check. Run it with `python3 tests/test_app.py`.

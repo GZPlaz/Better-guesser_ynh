@@ -6,9 +6,7 @@
 <title>Better Guesser</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 22s-8-7-8-12.5a8 8 0 0 1 16 0C20 15 12 22 12 22z' fill='%2329d398'/%3E%3Ccircle cx='12' cy='9.5' r='3' fill='%230d1321'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<link rel="stylesheet" href="https://unpkg.com/mapillary-js@4.1.2/dist/mapillary.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/mapillary-js@4.1.2/dist/mapillary.js"></script>
 <style>
   :root {
     --bg:#0d1321; --bg2:#111a2c; --panel:#172138; --panel2:#1e2a45; --line:#2a3758;
@@ -692,10 +690,36 @@ function hud() {
   $('#hud-round').textContent = `${game.round ?? game.rounds} / ${game.rounds}`;
   $('#hud-score').textContent = fmt(game.total);
 }
+// Google Maps JS is loaded on first play, with the key the admin set.
+let googleReady = null;
+function loadGoogle(key) {
+  return googleReady ??= new Promise((ok, no) => {
+    window.__gmReady = ok;
+    const sc = document.createElement('script');
+    sc.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&loading=async&callback=__gmReady`;
+    sc.onerror = () => { googleReady = null; no(new Error('Could not load Google Maps. Check your connection.')); };
+    document.head.append(sc);
+  });
+}
+window.gm_authFailure = () => toast('Google rejected the Maps API key. An admin needs to check it in Admin → Settings.', true);
+
+async function showPano() {
+  await loadGoogle(game.key);
+  const pov = { heading: Math.random() * 360, pitch: 0 };
+  if (!viewer) {
+    const { StreetViewPanorama } = await google.maps.importLibrary('streetView');
+    // No address box, road labels or close button: they'd give the location away.
+    viewer = new StreetViewPanorama($('#pano'), {
+      pano: game.image_id, pov, zoom: 0, addressControl: false, showRoadLabels: false, fullscreenControl: false,
+      motionTracking: false, motionTrackingControl: false, enableCloseButton: false, linksControl: true, panControl: true, zoomControl: true,
+    });
+    viewer.addListener('status_changed', () => viewer.getStatus() !== 'OK' && toast('This location\'s imagery failed to load. Place your best guess anyway.', true));
+  } else { viewer.setPano(game.image_id); viewer.setPov(pov); viewer.setZoom(0); }
+}
+
 function round() {
   show('v-game'); hud();
-  if (!viewer) viewer = new mapillary.Viewer({ accessToken: game.token, container: 'pano', imageId: game.image_id, component: { cover: false } });
-  else { viewer.resize(); viewer.moveTo(game.image_id).catch(() => toast('This location\'s imagery failed to load. Place your best guess anyway.', true)); }
+  showPano().catch(fail);
   if (!gmap) {
     gmap = L.map('gmap', { worldCopyJump: true, zoomControl: false }).setView([20, 0], 1);
     tiles().addTo(gmap);
@@ -894,14 +918,17 @@ async function adminSettings() {
   $('#admin').innerHTML = `<div class="grid" style="max-width:720px"><div class="panel"><form id="settings" class="grid">
     <label class="grid" style="gap:6px"><b>Announcement</b><span class="mute small">Shown in a banner to everyone, including on the login page. Leave empty to hide it.</span>
       <textarea id="s-ann" rows="2" maxlength="500">${esc(s.announcement)}</textarea></label>
-    <label class="grid" style="gap:6px"><b>Mapillary client token</b><span class="mute small">Free at mapillary.com/dashboard/developers. Register an app and copy its client token.</span><input id="s-token" value="${esc(s.mapillary_token)}"></label>
+    <label class="grid" style="gap:6px"><b>Google Maps API key</b><span class="mute small">From Google Cloud Console → APIs &amp; Services → Credentials, with the <b>Maps JavaScript API</b> and <b>Street View Static API</b> enabled.
+      Players' browsers use it, so restrict it to your site under <i>Website restrictions</i>.</span><input id="s-key" value="${esc(s.google_key)}" autocomplete="off"></label>
+    <label class="grid" style="gap:6px"><b>Server key</b> <span class="mute small">Optional. Google refuses website-restricted keys for server lookups, so if you restricted the key above, add a second key here restricted to your server's IP. Empty = use the key above.</span>
+      <input id="s-skey" value="${esc(s.google_server_key)}" autocomplete="off"></label>
     <div class="switch"><div><b>Open sign-ups</b><small>Let anyone create an account. Turn off to freeze the player list.</small></div><input type="checkbox" class="toggle" id="s-reg" ${s.registration_open ? 'checked' : ''} aria-label="Open sign-ups"></div>
     <div><button class="btn">Save settings</button></div></form></div>
     <div class="panel danger-zone"><h2 style="color:var(--bad);margin-bottom:6px">Danger zone</h2><p class="mute" style="margin-top:0">These can't be undone. Back up the app in YunoHost first.</p>
       ${Object.entries(danger).map(([k, v]) => `<div class="switch"><div><b style="text-transform:capitalize">${k.replace('_', ' ')}</b><small>${esc(v)}</small></div><button class="btn sm danger" data-danger="${k}">Run</button></div>`).join('')}</div></div>`;
   $('#settings').onsubmit = async e => {
     e.preventDefault();
-    try { await api('admin/settings', { announcement: $('#s-ann').value, mapillary_token: $('#s-token').value, registration_open: $('#s-reg').checked }); toast('Settings saved'); refreshMe(); }
+    try { await api('admin/settings', { announcement: $('#s-ann').value, google_key: $('#s-key').value, google_server_key: $('#s-skey').value, registration_open: $('#s-reg').checked }); toast('Settings saved'); refreshMe(); }
     catch (err) { fail(err); }
   };
   $('#admin').onclick = e => {

@@ -4,10 +4,10 @@ packaging_format = 2
 
 id = "betterguesser"
 name = "Better Guesser"
-description.en = "Self-hosted geography guessing game on real street-level imagery"
-description.fr = "Jeu de géographie auto-hébergé sur des images de rues réelles"
+description.en = "Self-hosted geography guessing game on Google Street View"
+description.fr = "Jeu de géographie auto-hébergé sur Google Street View"
 
-version = "0.6~ynh1"
+version = "0.7~ynh1"
 
 maintainers = []
 
@@ -50,9 +50,9 @@ ram.runtime = "40M"
     ask.en = "Password of the game's admin account"
     type = "password"
 
-    [install.mapillary_token]
-    ask.en = "Mapillary client access token"
-    help.en = "Free at https://www.mapillary.com/dashboard/developers (register an app, copy the 'Client Token'). You can also set it later in the admin panel."
+    [install.google_maps_key]
+    ask.en = "Google Maps API key"
+    help.en = "From https://console.cloud.google.com/google/maps-apis with the Maps JavaScript API and Street View Static API enabled (needs a billing account). You can also set it later in Admin → Settings."
     type = "string"
     optional = true
 

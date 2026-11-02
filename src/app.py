@@ -56,7 +56,7 @@ REPORT_REASONS = {"cheating": "Cheating", "name": "Offensive username", "abuse":
 SEATS = {"ranked": 2, "legend": 2, "1v1": 2, "2v2": 4}  # players per match; private lobbies are full by the time they start
 DAILY_CYCLE = 7  # daily reward grows for 7 straight days, then the cycle restarts
 
-# Cities with decent Mapillary coverage; rounds land somewhere within ~10 km of one.
+# Cities with good Google Street View coverage; rounds land somewhere around one of them.
 SEEDS = [
     (48.857, 2.352), (51.507, -0.128), (52.520, 13.405), (40.416, -3.704), (41.903, 12.496), (52.370, 4.895),
     (50.850, 4.352), (48.208, 16.373), (50.075, 14.438), (52.230, 21.012), (47.498, 19.040), (59.329, 18.069),
@@ -251,28 +251,39 @@ def score_for(km):
     return round(cfg("max_round_score") * math.exp(-km / cfg("score_falloff_km")))  # defaults: 1000 spot on, ~430 at 1000 km
 
 
-def pick_location(token):
-    """Return (image_id, lat, lng) of a random Mapillary image near a seed city."""
+def pick_location(key):
+    """Return (pano_id, lat, lng) of an official Google Street View panorama near a random area.
+    Uses the Street View metadata endpoint, which Google doesn't bill."""
     for _ in range(15):
         lat, lng = random.choice(seeds())
         spread = cfg("search_radius_km") / 111  # degrees
-        lat, lng, d = lat + random.uniform(-spread, spread), lng + random.uniform(-spread, spread), 0.02
-        q = urllib.parse.urlencode({"access_token": token, "fields": "id,geometry,is_pano", "limit": 20,
-                                    "bbox": f"{lng - d},{lat - d},{lng + d},{lat + d}"})
+        lat, lng = lat + random.uniform(-spread, spread), lng + random.uniform(-spread, spread)
+        q = urllib.parse.urlencode({"location": f"{lat:.6f},{lng:.6f}", "radius": 2000, "source": "outdoor", "key": key})
         try:
-            with urllib.request.urlopen(f"https://graph.mapillary.com/images?{q}", timeout=10) as r:
-                imgs = json.load(r).get("data", [])
-        except urllib.error.HTTPError as e:
-            if e.code in (400, 401, 403):
-                raise Err(502, f"Mapillary rejected the request (HTTP {e.code}) - check the token in the admin panel")
-            continue
+            with urllib.request.urlopen(f"https://maps.googleapis.com/maps/api/streetview/metadata?{q}", timeout=10) as r:
+                meta = json.load(r)
         except (OSError, ValueError):
             continue
-        if imgs:
-            img = next((i for i in imgs if i.get("is_pano")), imgs[0])  # prefer 360° panoramas
-            g_lng, g_lat = img["geometry"]["coordinates"]
-            return img["id"], g_lat, g_lng
-    raise Err(502, "Could not find street imagery, try again")
+        st = meta.get("status")
+        if st in ("REQUEST_DENIED", "OVER_QUERY_LIMIT", "INVALID_REQUEST"):
+            raise Err(502, f"Google Street View said {st}: {meta.get('error_message', 'check the API key in Admin → Settings')}")
+        # skip user-uploaded photo spheres: they're often indoors or mislocated
+        if st == "OK" and "Google" in meta.get("copyright", ""):
+            return meta["pano_id"], meta["location"]["lat"], meta["location"]["lng"]
+    raise Err(502, "Could not find Street View imagery, try again")
+
+
+def browser_key():
+    return setting("google_key")
+
+
+def server_key():
+    return setting("google_server_key") or browser_key()
+
+
+def need_key():
+    if not browser_key():
+        raise Err(503, "The admin has not set a Google Maps API key yet")
 
 
 # ---------- API handlers: fn(handler, body, *url_groups) -> dict | (dict, set_cookie) ----------
@@ -378,24 +389,24 @@ def game_state(u, gid):
         WHERE game_id=? AND score IS NOT NULL ORDER BY n""", (gid,)).fetchall()  # only finished rounds, so no answers leak
     lb = c.execute("SELECT code, mode FROM lobbies WHERE id=?", (g["lobby_id"],)).fetchone() if g["lobby_id"] else None
     state = {"id": g["id"], "rounds": g["rounds"], "lobby": lb["code"] if lb else None, "mode": lb["mode"] if lb else "solo", "total": g["total"], "done": bool(g["done"]),
-             "history": [dict(r) for r in played], "token": setting("mapillary_token")}
+             "history": [dict(r) for r in played], "key": browser_key()}
     if g["done"]:
         return state
     n = len(played) + 1
     cur = c.execute("SELECT image_id FROM rounds WHERE game_id=? AND n=?", (gid, n)).fetchone()
     if not cur:
         # network call, outside any transaction; lobby games share one set of locations
-        image_id, lat, lng = lobby_location(c, g["lobby_id"], n, state["token"]) if g["lobby_id"] else pick_location(state["token"])
+        image_id, lat, lng = lobby_location(c, g["lobby_id"], n, server_key()) if g["lobby_id"] else pick_location(server_key())
         with c:
             c.execute("INSERT OR IGNORE INTO rounds(game_id,n,image_id,lat,lng) VALUES(?,?,?,?,?)", (gid, n, image_id, lat, lng))
         cur = c.execute("SELECT image_id FROM rounds WHERE game_id=? AND n=?", (gid, n)).fetchone()
     return {**state, "round": n, "image_id": cur["image_id"]}
 
 
-def lobby_location(c, lobby_id, n, token):
+def lobby_location(c, lobby_id, n, key):
     q = "SELECT image_id, lat, lng FROM lobby_rounds WHERE lobby_id=? AND n=?"
     if not c.execute(q, (lobby_id, n)).fetchone():
-        loc = pick_location(token)
+        loc = pick_location(key)
         with c:
             c.execute("INSERT OR IGNORE INTO lobby_rounds VALUES(?,?,?,?,?)", (lobby_id, n, *loc))
     return tuple(c.execute(q, (lobby_id, n)).fetchone())
@@ -405,8 +416,7 @@ def api_new_game(h, b):
     u = h.user()
     require("mode_practice", "Practice")
     playable(u)
-    if not setting("mapillary_token"):
-        raise Err(503, "The admin has not set a Mapillary token yet")
+    need_key()
     with db() as c:
         gid = c.execute("INSERT INTO games(user_id, started, rounds) VALUES(?,?,?)", (u["id"], time.time(), cfg("rounds"))).lastrowid
     return game_state(u, gid)
@@ -518,8 +528,7 @@ def api_queue(h, b):
         raise Err(400, "Mode must be ranked, 1v1 or 2v2")
     require("mode_" + mode, {"ranked": "Ranked", "1v1": "Duel matchmaking", "2v2": "Team duel matchmaking"}[mode])
     playable(u)
-    if not setting("mapillary_token"):
-        raise Err(503, "The admin has not set a Mapillary token yet")
+    need_key()
     if mode == "ranked" and u["legend"]:
         mode = "legend"
     # ranked pairs the closest skill; casual queues just take the oldest open match
@@ -822,8 +831,7 @@ def api_lobby_play(h, b, code):
         raise Err(409, "The host hasn't started yet")
     if not db().execute("SELECT 1 FROM games WHERE lobby_id=? AND user_id=?", (lb["id"], u["id"])).fetchone():
         playable(u)  # maintenance blocks new games, not ones already underway
-    if not setting("mapillary_token"):
-        raise Err(503, "The admin has not set a Mapillary token yet")
+    need_key()
     with db() as c:
         c.execute("INSERT OR IGNORE INTO games(user_id, started, lobby_id, rounds) VALUES(?,?,?,?)", (u["id"], time.time(), lb["id"], lb["rounds"]))
         gid = c.execute("SELECT id FROM games WHERE lobby_id=? AND user_id=?", (lb["id"], u["id"])).fetchone()["id"]
@@ -910,14 +918,14 @@ CHEAT_FIELDS = {
 def api_admin_settings(h, b):
     me = h.user(admin=True)
     if h.command == "POST":
-        for key in ("mapillary_token", "announcement"):
+        for key in ("google_key", "google_server_key", "announcement"):
             if key in b:
                 set_setting(key, str(b[key]).strip()[:500])
         if "registration_open" in b:
             set_setting("registration_open", "1" if b["registration_open"] else "0")
         with db() as c:
-            audit(c, me, "settings", ", ".join(k for k in b if k != "mapillary_token") + (" token" if "mapillary_token" in b else ""))
-    return {"mapillary_token": setting("mapillary_token"), "registration_open": setting("registration_open") == "1",
+            audit(c, me, "settings", ", ".join(b))  # key names only, never the keys
+    return {"google_key": browser_key(), "google_server_key": setting("google_server_key"), "registration_open": setting("registration_open") == "1",
             "announcement": setting("announcement")}
 
 
@@ -1164,7 +1172,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send(404, json.dumps({"error": "Not found"}).encode())
 
 
-def cli_init(admin_name, token=""):
+def cli_init(admin_name, key=""):
     """Create/refresh the admin account (password read from stdin). Used by the YunoHost install script."""
     init_db()
     pw = valid_password(sys.stdin.readline().rstrip("\n"))
@@ -1172,8 +1180,8 @@ def cli_init(admin_name, token=""):
         c.execute("""INSERT INTO users(username,pw,is_admin,created) VALUES(?,?,1,?)
                      ON CONFLICT(username) DO UPDATE SET pw=excluded.pw, is_admin=1, banned=0""",
                   (valid_username(admin_name), hash_pw(pw), time.time()))
-    if token:
-        set_setting("mapillary_token", token)
+    if key:
+        set_setting("google_key", key)
 
 
 if __name__ == "__main__":

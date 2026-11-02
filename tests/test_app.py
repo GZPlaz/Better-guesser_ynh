@@ -1,5 +1,5 @@
-"""End-to-end self-check: python3 tests/test_app.py (no network; Mapillary is stubbed)."""
-import http.cookiejar, io, itertools, sqlite3, json, os, sys, tempfile, threading, urllib.error, urllib.request
+"""End-to-end self-check: python3 tests/test_app.py (no network; Google Street View is stubbed)."""
+import http.cookiejar, io, itertools, json, sqlite3, os, sys, tempfile, threading, urllib.error, urllib.request
 
 os.environ["BG_DB"] = os.path.join(tempfile.mkdtemp(), "t.db")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -8,6 +8,7 @@ import app  # noqa: E402
 # Seed a v0.1-style database (no lobby columns) to prove the upgrade migration works.
 sqlite3.connect(os.environ["BG_DB"]).executescript(
     "CREATE TABLE games(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, started REAL, total INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0);")
+real_pick = app.pick_location
 _imgs = itertools.count(1)
 app.pick_location = lambda token: (f"img{next(_imgs)}", 48.857, 2.352)  # always Paris, new image each call
 sys.stdin = io.StringIO("adminpass\n")
@@ -451,8 +452,38 @@ boss("admin/danger", {"action": "wipe_matches", "confirm": "wipe_matches"})
 assert all(u["games"] == 0 for u in boss("admin/users")["users"])
 
 # settings + closed sign-ups
-boss("admin/settings", {"mapillary_token": "t2", "registration_open": False})
-assert boss("admin/settings") == {"mapillary_token": "t2", "registration_open": False, "announcement": "Season 2 starts Monday"}
+boss("admin/settings", {"google_key": "browser-key", "registration_open": False})
+assert boss("admin/settings") == {"google_key": "browser-key", "google_server_key": "", "registration_open": False, "announcement": "Season 2 starts Monday"}
+assert app.server_key() == "browser-key"  # falls back to the browser key
+boss("admin/settings", {"google_server_key": "server-key"})
+assert app.server_key() == "server-key" and app.browser_key() == "browser-key"
+assert not any(k in (e["detail"] or "") for e in boss("admin/log")["log"] for k in ("browser-key", "server-key"))  # keys never logged
+
+# real pick_location against fake Google responses: skips empty spots and user photo spheres
+answers = iter([{"status": "ZERO_RESULTS"}, {"status": "OK", "copyright": "© Some Hiker", "pano_id": "user", "location": {"lat": 1, "lng": 2}},
+                {"status": "OK", "copyright": "© 2024 Google", "pano_id": "PANO123", "location": {"lat": 48.1, "lng": 11.5}}])
+seen = []
+
+
+class FakeResp(io.BytesIO):
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+
+
+def fake_urlopen(url, timeout=None):
+    seen.append(url)
+    return FakeResp(json.dumps(next(answers)).encode())
+
+
+app.urllib.request.urlopen = fake_urlopen
+assert real_pick("K") == ("PANO123", 48.1, 11.5)
+assert len(seen) == 3 and "key=K" in seen[0] and "source=outdoor" in seen[0] and "maps.googleapis.com/maps/api/streetview/metadata" in seen[0]
+answers = iter([{"status": "REQUEST_DENIED", "error_message": "API key invalid"}])
+try:
+    real_pick("bad")
+    raise AssertionError("expected an error")
+except app.Err as e:
+    assert e.code == 502 and "REQUEST_DENIED" in e.msg and "API key invalid" in e.msg
 client()("register", {"username": "eve", "password": "secret1"}, expect=403)
 
 # ---- login throttling (last: it locks out this IP) ----
