@@ -15,7 +15,7 @@ Leave the access permission on `visitors` so friends can sign up in the game its
 ### Getting a Google Maps API key
 
 1. Go to https://console.cloud.google.com/google/maps-apis and create a project. Google requires a billing account on it.
-2. Enable the **Maps JavaScript API** (the Street View viewer players see) and the **Street View Static API** (the server uses its free metadata lookup to pick places).
+2. Enable the **Maps JavaScript API** (the Street View viewer and the guess and result maps players see) and the **Street View Static API** (the server uses its free metadata lookup to pick places).
 3. Under **APIs & Services → Credentials**, create an API key and paste it into the install, or into Admin → Settings.
 
 The key ends up in players' browsers, which is how Google Maps works, so **restrict it**:
@@ -39,10 +39,17 @@ Matchmade games don't wait for everyone to be online: you play straight away, an
 
 - Profiles with ranked and casual records (wins, losses, draws), best and average game, average distance, near-perfect rounds, and recent matches.
 - Leaderboards: Legend Division (MMR), Ranked (RP), and Best games.
-- **Daily reward**: claim once a day (days are in UTC) to build a 7-day streak. Day 1 gives +5 RP and day 7 gives +35 RP, then the cycle starts over. Legends get +1 to +7 MMR. Missing a day resets the streak.
+- **Daily quests**: 3 quests a day, the same for everyone, with new ones at midnight UTC. Examples are "Land 3 guesses within 50 km", "Score a near-perfect round" and "Win a ranked match".
+  - Easy quests pay +10 RP, medium +20 and hard +35. Legends get a fifth of that as MMR.
+  - Progress comes from the games you actually played that day. Claim each finished quest from the home page or the quest button in the top bar.
+  - Quests for modes the admin has switched off never appear.
 - **Reports**: players can report anyone from their profile or from a match, for cheating, an offensive username, harassment, or something else, with an optional note. Each player can have one open report per person, and at most 10 reports a day.
 - Changing your password logs out your other devices. Logins are throttled after 10 failures in 15 minutes from one IP.
-- In-game: full-screen street view, a pop-out guess map, Space/Enter to guess, a result after each round, and an end-of-game summary map.
+- In-game: full-screen Street View and a Google guess map with shops, stations and other places hidden, so they don't give the answer away.
+  - The guess map grows when you hover over it. Use − and + to pick its size, and the pin to keep it open. Both choices are remembered.
+  - On phones, the map sits behind a Map button so it doesn't cover the street view.
+  - Press Space or Enter to guess. After each round, the result map shows a dashed great-circle line from your pin to the answer, and the end-of-game summary shows every round numbered.
+  - Each browser session uses one guess map and one result map, which count toward Google's free Dynamic Maps allowance.
 
 ## Admin panel
 
@@ -51,7 +58,7 @@ Log in as an admin and open **Admin** from the account menu. The admin panel con
 - **Accounts**:
   - create accounts (optionally as admins)
   - rename players and change their rank (choosing a rank snaps RP into its range, and *Legend* moves the player into Legend Division)
-  - edit RP, MMR and daily streak
+  - edit RP and MMR
   - make admin, ban, set a password, kick, reset stats, delete
   - see open reports, join date, last login, IP, sessions and games
 - **Matches**: every match in every mode, with players, scores, progress, results and RP/MMR changes.
@@ -62,10 +69,12 @@ Log in as an admin and open **Admin** from the account menu. The admin panel con
   - rounds per game, max points per round, how forgiving scoring is
   - the rank thresholds (Silver through Master)
   - the RP formula (swing, gap scale, cap, minimum, blowout margin) and the MMR formula (swing, gap scale, starting MMR)
-  - daily reward amounts and cycle length
+  - quests per day and quest rewards (easy, medium, hard)
   - match expiry, login lockout, session length, and the daily report limit
-- **Modes & features** (also under Game rules): switch ranked, Legend Division, duel and team-duel matchmaking, private lobbies, practice, daily rewards and reports on or off. **Maintenance mode** lets only admins start games, while games already in progress can finish.
-- **Locations**: the list of areas rounds are drawn from (latitude, longitude per line), and how far from each area's centre a round can land. One click returns to the built-in world list.
+- **Modes & features** (also under Game rules): switch ranked, Legend Division, duel and team-duel matchmaking, private lobbies, practice, daily quests and reports on or off. **Maintenance mode** lets only admins start games, while games already in progress can finish.
+- **Locations**: the list of city centres rounds are drawn from (latitude, longitude per line), with about 260 cities on every continent built in. One click returns to that built-in list. Under Game rules:
+  - **City rounds**: the chance a round lands in town (default 85%, within 4 km of a city centre).
+  - **Countryside spread**: how far out the other rounds can land (default 40 km), so forests, fields and jungle stay rare.
 - **Settings**: the announcement banner (shown to everyone, including on the login page), the Google Maps API key (plus an optional server key), and whether sign-ups are open.
   - The **Danger zone** can reset the season (all RP, Legend status and MMR), wipe all matches, or wipe all reports. Each needs you to type the action's name to confirm.
 - **My cheats**: admin-only, and they apply only to your own account, in every mode. Nobody can switch cheats on for someone else, and demoting an admin switches their cheats off.
@@ -79,6 +88,6 @@ Log in as an admin and open **Admin** from the account menu. The admin panel con
 ## Layout
 
 - `src/app.py`: the server (Python stdlib, SQLite in the app's data dir)
-- `src/index.html`: the whole frontend (Leaflet for the guess map, Google Maps JS for Street View)
+- `src/index.html`: the whole frontend (Google Maps JS for Street View and both maps)
 - `scripts/`, `conf/`, `manifest.toml`: YunoHost packaging (v2, helpers 2.1)
 - `tests/test_app.py`: an end-to-end self-check. Run it with `python3 tests/test_app.py`.

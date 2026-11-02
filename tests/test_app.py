@@ -260,28 +260,58 @@ boss("admin/user", {"id": ids["pq1"], "action": "update", "fields": {"is_admin":
 assert not q1("me")["cheat_aim"]
 q1(f"game/{q1('game', {})['id']}/peek", expect=403)
 
-# ---- daily rewards ----
+# ---- daily quests (replaced daily rewards) ----
 import datetime  # noqa: E402
-day0 = datetime.date(2026, 1, 1)
-app.utc_today = lambda: day0
-me5 = q5("me")
-assert me5["daily_available"] and me5["daily_next"] == {"day": 1, "amount": 5, "unit": "RP"} and me5["daily_streak"] == 0
-rp = me5["rank_points"]
-assert q5("daily", {})["amount"] == 5
-q5("daily", {}, expect=409)  # once per day
-assert not q5("me")["daily_available"] and q5("me")["rank_points"] == rp + 5
-assert q5("me")["daily_next"]["amount"] == 10  # tomorrow's reward, shown after claiming
-app.utc_today = lambda: day0 + datetime.timedelta(days=1)
-assert q5("daily", {}) == {"day": 2, "amount": 10, "unit": "RP", "streak": 2}
-app.utc_today = lambda: day0 + datetime.timedelta(days=3)  # missed a day
-assert q5("me")["daily_streak"] == 0
-assert q5("daily", {})["streak"] == 1
-for i in range(4, 11):  # 7 more days in a row: the reward cycles back to day 1 after day 7
-    app.utc_today = lambda i=i: day0 + datetime.timedelta(days=i)
-    r = q5("daily", {})
-assert r == {"day": 1, "amount": 5, "unit": "RP", "streak": 8}, r
-mmr = ben("me")["mmr"]
-assert ben("daily", {})["unit"] == "MMR" and ben("me")["mmr"] == mmr + 1  # legends get MMR
+real_today = app.utc_today
+boss("admin/config", {"values": {"quests_per_day": 12}})  # show the whole pool
+qz = client()
+qz("register", {"username": "quester", "password": "secret1"})
+ql = qz("quests")
+qs = {q["key"]: q for q in ql["quests"]}
+assert set(qs) == set(app.QUESTS) and not any(q["done"] for q in qs.values()) and 0 < ql["resets_in"] <= 86400
+assert [app.TIER_ORDER[q["tier"]] for q in ql["quests"]] == sorted(app.TIER_ORDER[q["tier"]] for q in ql["quests"])  # easy first
+assert qs["points_today"]["title"] == "Earn 10,000 points today" and qs["finish_games"]["title"] == "Finish 3 games"
+qz("quests/claim", {"key": "finish_games"}, expect=409)  # not done yet
+g = qz("game", {})
+for _ in range(5):
+    qz(f"game/{g['id']}/guess", {"lat": 48.857, "lng": 2.352})
+    g = qz(f"game/{g['id']}")
+qs = {q["key"]: q for q in qz("quests")["quests"]}
+assert {k for k, q in qs.items() if q["done"]} == {"near_perfect", "big_game", "close_guesses"}, qs
+assert (qs["rounds_played"]["progress"], qs["finish_games"]["progress"], qs["points_today"]["progress"]) == (5, 1, 5000)
+assert qz("me")["quests_claimable"] == 3
+rp0 = qz("me")["rank_points"]
+assert qz("quests/claim", {"key": "big_game"}) == {"reward": 35, "unit": "RP"}
+qz("quests/claim", {"key": "big_game"}, expect=409)  # once
+qz("quests/claim", {"key": "nope"}, expect=404)
+assert qz("me")["rank_points"] == rp0 + 35 and qz("me")["quests_claimable"] == 2
+# rewards are admin-tunable; legends earn a fifth as MMR
+boss("admin/config", {"values": {"quest_rp_easy": 50}})
+assert {q["key"]: q for q in qz("quests")["quests"]}["close_guesses"]["reward"] == 50
+assert all(q["unit"] == "MMR" for q in ben("quests")["quests"])
+assert {q["key"]: q for q in ben("quests")["quests"]}["close_guesses"]["reward"] == 10
+# quests for modes that are off never show up
+boss("admin/config", {"values": {"mode_ranked": False}})
+assert not {"play_ranked", "win_ranked"} & {q["key"] for q in qz("quests")["quests"]}
+boss("admin/config", {"values": {"mode_ranked": True, "quest_rp_easy": 10, "quests_per_day": 3}})
+# everyone gets the same 3 quests today, and a new day starts fresh
+assert [q["key"] for q in qz("quests")["quests"]] == [q["key"] for q in q2("quests")["quests"]] and len(q2("quests")["quests"]) == 3
+app.utc_today = lambda: real_today() + datetime.timedelta(days=1)
+assert all(q["progress"] == 0 and not q["claimed"] for q in qz("quests")["quests"])
+app.utc_today = real_today
+assert [app.todays_quests(datetime.date(2026, 5, d)) for d in (1, 2)] != [app.todays_quests(datetime.date(2026, 5, 1))] * 2  # varies by day
+
+# ---- spawns: mostly cities, some countryside ----
+import random  # noqa: E402
+near = lambda la, ln: min(app.haversine_km(la, ln, *c) for c in app.SEEDS)  # noqa: E731
+random.seed(7)
+pts = [app.pick_point() for _ in range(2000)]
+city = [p for p in pts if p[2] == 800]
+assert 0.80 < len(city) / len(pts) < 0.90, len(city)  # default 85%
+assert all(near(la, ln) <= 4.01 for la, ln, _ in city) and all(near(la, ln) <= 40.1 for la, ln, _ in pts)
+boss("admin/config", {"values": {"city_chance": 100}})
+assert all(app.pick_point()[2] == 800 for _ in range(200))
+boss("admin/config", {"values": {"city_chance": 85}})
 
 # ---- profiles ----
 pr = ben("profile/ben")
@@ -361,16 +391,17 @@ assert me2["rank"] == "Silver" and me2["rank_floor"] == 10 and me2["next_rank_at
 boss("admin/config", {"values": {"rank_silver": 100}})
 
 # modes & features on/off, public status
-off = {"mode_2v2": False, "mode_practice": False, "daily_enabled": False, "reports_enabled": False, "mode_private": False, "mode_legend": False}
+off = {"mode_2v2": False, "mode_practice": False, "quests_enabled": False, "reports_enabled": False, "mode_private": False, "mode_legend": False}
 boss("admin/config", {"values": off})
 q2("queue", {"mode": "2v2"}, expect=403)
 q2("game", {}, expect=403)
-q2("daily", {}, expect=403)
+q2("quests", expect=403)
+q2("quests/claim", {"key": "duel"}, expect=403)
 q2("report", {"username": "pq4", "reason": "other"}, expect=403)
 q2("lobby", {"mode": "1v1"}, expect=403)
 q2("legend/enter", {}, expect=403)
 st = client()("status")
-assert st["modes"]["2v2"] is False and st["modes"]["ranked"] is True and not st["daily_enabled"]
+assert st["modes"]["2v2"] is False and st["modes"]["ranked"] is True and not st["quests_enabled"]
 boss("admin/config", {"values": {k: True for k in off}})
 
 # maintenance: only admins can start games
@@ -382,10 +413,6 @@ boss("admin/config", {"values": {"maintenance": False}})
 boss("admin/settings", {"announcement": "Season 2 starts Monday"})
 assert client()("status")["announcement"] == "Season 2 starts Monday" and q2("me")["server"]["announcement"]
 
-# daily reward amounts
-boss("admin/config", {"values": {"daily_rp": 10, "daily_cycle": 3}})
-assert q2("me")["daily_track"] == [10, 20, 30]
-boss("admin/config", {"values": {"daily_rp": 5, "daily_cycle": 7}})
 
 # matches: void undoes rating changes; end resolves now
 app.match_ttl = lambda: -1
@@ -409,12 +436,11 @@ boss("admin/match", {"code": mc, "action": "end"})
 assert q2(f"lobby/{mc}")["expired"]  # nobody joined: closed without a result
 boss("admin/match", {"code": mc, "action": "explode"}, expect=400)
 
-# accounts: create, edit streak; reports: delete
+# accounts: create; reports: delete
 boss("admin/create", {"username": "newbie", "password": "secret1", "is_admin": False})
 boss("admin/create", {"username": "newbie", "password": "secret1"}, expect=409)
 client()("login", {"username": "newbie", "password": "secret1"})
-boss("admin/user", {"id": ids["pq5"], "action": "update", "fields": {"daily_streak": 42}})
-assert next(u for u in boss("admin/users")["users"] if u["username"] == "pq5")["daily_streak"] == 42
+assert next(u for u in boss("admin/users")["users"] if u["username"] == "quester")["quests_done"] == 1
 q4("report", {"username": "pq2", "reason": "other"})
 rid = boss("admin/reports")["reports"][0]["id"]
 boss("admin/report", {"id": rid, "action": "delete"})

@@ -32,31 +32,33 @@ CONFIG = {
     "elo_k": (32, 1, 500, "Legend MMR", "MMR swing (K)", ""),
     "elo_scale": (400, 10, 10_000, "Legend MMR", "MMR gap scale", ""),
     "start_mmr": (1500, 0, 10_000, "Legend MMR", "Starting MMR", "Given when a player enters Legend Division."),
-    "daily_rp": (5, 0, 10_000, "Daily reward", "RP per streak day", "Day N pays N x this."),
-    "daily_mmr": (1, 0, 1000, "Daily reward", "MMR per streak day (legends)", ""),
-    "daily_cycle": (7, 1, 365, "Daily reward", "Streak cycle (days)", "After this many days the reward starts over at day 1."),
+    "quests_per_day": (3, 1, 12, "Daily quests", "Quests per day", "Everyone gets the same quests each day (UTC); new ones at midnight."),
+    "quest_rp_easy": (10, 0, 10_000, "Daily quests", "Reward: easy quest (RP)", "Legends get a fifth of this as MMR."),
+    "quest_rp_medium": (20, 0, 10_000, "Daily quests", "Reward: medium quest (RP)", ""),
+    "quest_rp_hard": (35, 0, 10_000, "Daily quests", "Reward: hard quest (RP)", ""),
     "match_ttl_hours": (24, 1, 24 * 30, "Matches", "Match expiry (hours)", "Unfinished matchmade games are resolved after this: no-shows forfeit."),
     "lobby_max": (20, 2, 200, "Matches", "Max players in an old free-for-all lobby", ""),
     "login_max_fails": (10, 1, 1000, "Security", "Failed logins before lockout", "Per IP address."),
     "login_window_min": (15, 1, 1440, "Security", "Lockout window (minutes)", ""),
     "session_days": (30, 1, 365, "Security", "Stay logged in (days)", ""),
     "report_daily_limit": (10, 1, 1000, "Security", "Reports per player per day", ""),
-    "search_radius_km": (11, 1, 500, "Locations", "Spread around each area (km)", "Rounds land up to this far from an area's centre."),
+    "city_chance": (85, 0, 100, "Locations", "City rounds (%)", "Chance a round lands in a city centre. The rest land out in the countryside around it."),
+    "city_radius_km": (4, 1, 100, "Locations", "City spread (km)", "City rounds land within this distance of an area's centre."),
+    "countryside_radius_km": (40, 1, 500, "Locations", "Countryside spread (km)", "Countryside rounds land within this distance of an area's centre."),
     "mode_ranked": (True, None, None, "Modes & features", "Ranked duels", ""),
     "mode_legend": (True, None, None, "Modes & features", "Legend Division", "Off: Master players can't enter (existing legends keep playing)."),
     "mode_1v1": (True, None, None, "Modes & features", "Duel matchmaking", ""),
     "mode_2v2": (True, None, None, "Modes & features", "Team duel matchmaking", ""),
     "mode_private": (True, None, None, "Modes & features", "Private lobbies", ""),
     "mode_practice": (True, None, None, "Modes & features", "Practice", ""),
-    "daily_enabled": (True, None, None, "Modes & features", "Daily rewards", ""),
+    "quests_enabled": (True, None, None, "Modes & features", "Daily quests", ""),
     "reports_enabled": (True, None, None, "Modes & features", "Player reports", ""),
     "maintenance": (False, None, None, "Modes & features", "Maintenance mode", "Only admins can start new games. Games in progress can finish."),
 }
 REPORT_REASONS = {"cheating": "Cheating", "name": "Offensive username", "abuse": "Harassment or abuse", "other": "Other"}
 SEATS = {"ranked": 2, "legend": 2, "1v1": 2, "2v2": 4}  # players per match; private lobbies are full by the time they start
-DAILY_CYCLE = 7  # daily reward grows for 7 straight days, then the cycle restarts
 
-# Cities with good Google Street View coverage; rounds land somewhere around one of them.
+# City centres with good Google Street View coverage. Most rounds land in town (see city_chance); some in the countryside around it.
 SEEDS = [
     (48.857, 2.352), (51.507, -0.128), (52.520, 13.405), (40.416, -3.704), (41.903, 12.496), (52.370, 4.895),
     (50.850, 4.352), (48.208, 16.373), (50.075, 14.438), (52.230, 21.012), (47.498, 19.040), (59.329, 18.069),
@@ -72,6 +74,51 @@ SEEDS = [
     (-6.209, 106.846), (21.028, 105.834), (28.614, 77.209), (19.076, 72.878), (12.972, 77.595), (6.927, 79.861),
     (-33.925, 18.424), (-26.204, 28.047), (-1.292, 36.822), (5.604, -0.187), (6.524, 3.379), (33.573, -7.590),
     (30.044, 31.236), (41.008, 28.978), (32.085, 34.782), (25.205, 55.271), (43.238, 76.946), (41.716, 44.783),
+    # UK & Ireland
+    (52.486, -1.890), (55.864, -4.252), (53.408, -2.991), (53.801, -1.549), (51.454, -2.588), (51.481, -3.179), (54.597, -5.930),
+    (51.899, -8.475),
+    # France, Benelux
+    (45.764, 4.836), (43.605, 1.444), (44.838, -0.579), (47.218, -1.554), (50.629, 3.057), (48.573, 7.752), (43.710, 7.262),
+    (43.611, 3.877), (48.117, -1.678), (51.924, 4.478), (52.091, 5.122), (52.070, 4.300), (51.442, 5.470), (51.219, 4.402),
+    (51.054, 3.725), (49.612, 6.130),
+    # Germany, Switzerland, Austria
+    (53.551, 9.994), (48.137, 11.576), (50.938, 6.960), (50.110, 8.682), (48.776, 9.183), (51.228, 6.774), (51.340, 12.375),
+    (51.050, 13.738), (49.452, 11.077), (52.376, 9.732), (53.079, 8.802), (46.204, 6.143), (47.560, 7.589), (46.948, 7.447),
+    (47.071, 15.439), (47.809, 13.055),
+    # Iberia, Italy
+    (39.470, -0.376), (37.389, -5.984), (43.263, -2.935), (36.721, -4.421), (41.649, -0.889), (41.158, -8.629), (45.070, 7.687),
+    (40.852, 14.268), (43.770, 11.256), (44.494, 11.343), (38.116, 13.361), (44.405, 8.946),
+    # Nordics, central & eastern Europe, Turkey, Caucasus
+    (57.709, 11.975), (55.605, 13.004), (60.391, 5.322), (56.163, 10.204), (61.498, 23.761), (63.431, 10.395), (50.065, 19.945),
+    (51.108, 17.039), (54.352, 18.646), (52.406, 16.925), (49.195, 16.608), (48.149, 17.107), (44.787, 20.457), (43.856, 18.413),
+    (46.771, 23.624), (50.450, 30.524), (49.839, 24.030), (40.640, 22.944), (40.179, 44.499), (39.933, 32.860), (38.423, 27.143),
+    # USA, Canada, Mexico
+    (42.360, -71.059), (39.953, -75.165), (38.907, -77.037), (33.749, -84.388), (28.538, -81.379), (27.951, -82.457),
+    (32.777, -96.797), (30.267, -97.743), (29.424, -98.494), (33.448, -112.074), (36.170, -115.140), (32.716, -117.161),
+    (45.515, -122.679), (40.761, -111.891), (44.978, -93.265), (42.331, -83.046), (40.441, -79.996), (36.163, -86.781),
+    (29.951, -90.072), (39.100, -94.579), (38.627, -90.199), (35.227, -80.843), (39.290, -76.612), (21.307, -157.858),
+    (61.218, -149.900), (39.961, -82.999), (39.768, -86.158), (38.582, -121.494), (51.045, -114.058), (53.546, -113.494),
+    (45.421, -75.697), (46.813, -71.208), (49.895, -97.138), (44.649, -63.575), (25.686, -100.316), (19.041, -98.206),
+    (20.967, -89.624),
+    # Central & South America
+    (6.244, -75.581), (3.452, -76.532), (14.634, -90.506), (9.928, -84.091), (8.983, -79.517), (18.486, -69.931),
+    (-34.901, -56.164), (-25.264, -57.576), (-16.500, -68.150), (-19.917, -43.935), (-15.794, -47.882), (-30.035, -51.218),
+    (-25.429, -49.271), (-8.048, -34.877), (-12.977, -38.501), (-3.732, -38.527), (-31.420, -64.188), (-32.944, -60.651),
+    (-33.047, -71.613), (-2.170, -79.922),
+    # East & Southeast Asia
+    (35.012, 135.768), (35.181, 136.906), (33.590, 130.402), (43.062, 141.354), (35.444, 139.638), (35.180, 129.075),
+    (35.871, 128.601), (24.148, 120.674), (22.627, 120.301), (22.319, 114.169), (10.823, 106.630), (18.788, 98.985),
+    (11.556, 104.928), (5.414, 100.329), (10.316, 123.885), (-6.917, 107.619), (-7.257, 112.752), (-8.650, 115.216),
+    (47.886, 106.906),
+    # South & West Asia, Central Asia
+    (27.717, 85.324), (23.810, 90.413), (13.083, 80.271), (22.573, 88.364), (17.385, 78.487), (18.520, 73.857),
+    (23.023, 72.571), (31.768, 35.214), (31.954, 35.911), (25.285, 51.531), (24.454, 54.377), (42.875, 74.570),
+    # Oceania
+    (-34.929, 138.601), (-35.281, 149.129), (-42.882, 147.327), (-28.017, 153.400), (-43.532, 172.637), (-12.463, 130.842),
+    # Africa
+    (-29.858, 31.022), (-25.747, 28.229), (-33.961, 25.615), (-22.560, 17.083), (-24.628, 25.923), (0.348, 32.582),
+    (-1.944, 30.062), (14.716, -17.467), (36.806, 10.181),
+    (-6.792, 39.208), (-4.043, 39.668),
 ]
 
 SCHEMA = """
@@ -93,6 +140,8 @@ CREATE TABLE IF NOT EXISTS reports(id INTEGER PRIMARY KEY, reporter_id INTEGER R
   target_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, reason TEXT NOT NULL, details TEXT, lobby_code TEXT,
   created REAL, status TEXT NOT NULL DEFAULT 'open', resolved_by TEXT, resolved_at REAL);
 CREATE TABLE IF NOT EXISTS admin_log(id INTEGER PRIMARY KEY, ts REAL, admin TEXT, action TEXT, detail TEXT);
+CREATE TABLE IF NOT EXISTS quest_claims(user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, day TEXT NOT NULL,
+  quest TEXT NOT NULL, reward REAL, PRIMARY KEY(user_id, day, quest));
 CREATE TABLE IF NOT EXISTS lobby_rounds(lobby_id INTEGER NOT NULL REFERENCES lobbies(id) ON DELETE CASCADE, n INTEGER NOT NULL,
   image_id TEXT, lat REAL, lng REAL, PRIMARY KEY(lobby_id, n));
 """
@@ -251,14 +300,24 @@ def score_for(km):
     return round(cfg("max_round_score") * math.exp(-km / cfg("score_falloff_km")))  # defaults: 1000 spot on, ~430 at 1000 km
 
 
+def pick_point():
+    """A random spot to look for imagery: usually a city centre, sometimes the countryside around it.
+    Returns (lat, lng, search radius in metres): cities search tightly so we stay in town."""
+    lat, lng = random.choice(seeds())
+    city = random.random() * 100 < cfg("city_chance")
+    km = cfg("city_radius_km" if city else "countryside_radius_km") * math.sqrt(random.random())  # uniform over the disc
+    ang = random.uniform(0, 2 * math.pi)
+    lat = max(-85, min(85, lat + km / 111 * math.cos(ang)))
+    lng = (lng + km / (111 * max(0.1, math.cos(math.radians(lat)))) * math.sin(ang) + 180) % 360 - 180
+    return lat, lng, 800 if city else 5000
+
+
 def pick_location(key):
     """Return (pano_id, lat, lng) of an official Google Street View panorama near a random area.
     Uses the Street View metadata endpoint, which Google doesn't bill."""
     for _ in range(15):
-        lat, lng = random.choice(seeds())
-        spread = cfg("search_radius_km") / 111  # degrees
-        lat, lng = lat + random.uniform(-spread, spread), lng + random.uniform(-spread, spread)
-        q = urllib.parse.urlencode({"location": f"{lat:.6f},{lng:.6f}", "radius": 2000, "source": "outdoor", "key": key})
+        lat, lng, radius_m = pick_point()
+        q = urllib.parse.urlencode({"location": f"{lat:.6f},{lng:.6f}", "radius": radius_m, "source": "outdoor", "key": key})
         try:
             with urllib.request.urlopen(f"https://maps.googleapis.com/maps/api/streetview/metadata?{q}", timeout=10) as r:
                 meta = json.load(r)
@@ -355,15 +414,10 @@ def api_me(h, b):
     rk = ranks()
     nxt = next((floor for floor, _ in rk if floor > u["rank_points"]), None)
     floor = [f for f, _ in rk if f <= u["rank_points"]][-1]
-    today = utc_today()
-    claimed = u["daily_last"] == today.isoformat()
     return {"username": u["username"], "is_admin": bool(u["is_admin"]),
             "cheat_reveal": bool(cheat(u, "cheat_reveal")), "cheat_aim": bool(cheat(u, "cheat_aim")),
             "open_reports": db().execute("SELECT COUNT(*) FROM reports WHERE status='open'").fetchone()[0] if u["is_admin"] else 0,
-            "daily_available": not claimed,
-            "daily_next": daily_reward(u["daily_streak"] + 1 if claimed else next_streak(u, today), u["legend"]),
-            "daily_streak": u["daily_streak"] if u["daily_last"] in (today.isoformat(), str(today - datetime.timedelta(days=1))) else 0,
-            "daily_track": [daily_reward(d, u["legend"])["amount"] for d in range(1, cfg("daily_cycle") + 1)],
+            "quests_claimable": sum(q["done"] and not q["claimed"] for q in quest_state(u)) if cfg("quests_enabled") else 0,
             "rank": rank_name(u["rank_points"]), "rank_points": u["rank_points"], "next_rank_at": nxt, "rank_floor": floor,
             "legend": bool(u["legend"]), "legend_eligible": u["rank_points"] >= legend_rp() and cfg("mode_legend"),
             "mmr": round(u["mmr"]), "server": status()}
@@ -372,7 +426,7 @@ def api_me(h, b):
 def status():
     return {"announcement": setting("announcement"), "maintenance": cfg("maintenance"), "rounds": cfg("rounds"), "max_round_score": cfg("max_round_score"), "registration_open": setting("registration_open") == "1",
             "modes": {k[5:]: cfg(k) for k in CONFIG if k.startswith("mode_")},
-            "daily_enabled": cfg("daily_enabled"), "reports_enabled": cfg("reports_enabled")}
+            "quests_enabled": cfg("quests_enabled"), "reports_enabled": cfg("reports_enabled")}
 
 
 def api_status(h, b):
@@ -561,28 +615,101 @@ def utc_today():
     return datetime.datetime.now(datetime.timezone.utc).date()
 
 
-def next_streak(u, today):
-    """Streak you'd have after claiming today: continues only if you claimed yesterday."""
-    return u["daily_streak"] + 1 if u["daily_last"] == str(today - datetime.timedelta(days=1)) else 1
+# key: (title, tier, target, mode setting it needs). {n} is the target; {pts} is the points goal.
+QUESTS = {
+    "finish_games": ("Finish {n} games", "easy", 3, None),
+    "rounds_played": ("Play {n} rounds", "easy", 10, None),
+    "close_guesses": ("Land {n} guesses within 50 km", "easy", 3, None),
+    "duel": ("Finish a duel", "easy", 1, "mode_1v1"),
+    "team_duel": ("Finish a team duel", "easy", 1, "mode_2v2"),
+    "near_perfect": ("Score a near-perfect round (99%+)", "medium", 1, None),
+    "points_today": ("Earn {pts} points today", "medium", 10, None),  # target is in max-round-scores
+    "win_match": ("Win a match", "medium", 1, None),
+    "play_ranked": ("Finish {n} ranked matches", "medium", 2, "mode_ranked"),
+    "big_game": ("Score 80%+ of the max in one game", "hard", 1, None),
+    "win_two": ("Win {n} matches", "hard", 2, None),
+    "win_ranked": ("Win a ranked match", "hard", 1, "mode_ranked"),
+}
+TIER_ORDER = {"easy": 0, "medium": 1, "hard": 2}
 
 
-def daily_reward(streak, legend):
-    day = (streak - 1) % cfg("daily_cycle") + 1
-    return {"day": day, "amount": day * cfg("daily_mmr" if legend else "daily_rp"), "unit": "MMR" if legend else "RP"}
+def todays_quests(day):
+    """Same quests for everyone on a given UTC day, skipping ones for modes the admin turned off."""
+    pool = [k for k, q in QUESTS.items() if not q[3] or cfg(q[3])]
+    picked = random.Random(f"quests-{day.isoformat()}").sample(pool, min(cfg("quests_per_day"), len(pool)))
+    return sorted(picked, key=lambda k: (TIER_ORDER[QUESTS[k][1]], k))
 
 
-def api_daily(h, b):
-    u, today = h.user(), utc_today()
-    require("daily_enabled", "Daily rewards")
-    streak = next_streak(u, today)
-    reward = daily_reward(streak, u["legend"])
+def quest_reward(tier, legend):
+    rp = cfg("quest_rp_" + tier)
+    return (max(1, round(rp / 5)) if rp else 0, "MMR") if legend else (rp, "RP")
+
+
+def quest_state(u, day=None):
+    day = day or utc_today()
+    start = datetime.datetime.combine(day, datetime.time(), datetime.timezone.utc).timestamp()
+    c, span = db(), (u["id"], start, start + 86400)
+    games = c.execute("""SELECT g.total, g.done, g.rounds, l.mode FROM games g LEFT JOIN lobbies l ON l.id=g.lobby_id
+        WHERE g.user_id=? AND g.started>=? AND g.started<?""", span).fetchall()
+    rounds = c.execute("""SELECT r.score, r.distance FROM rounds r JOIN games g ON g.id=r.game_id
+        WHERE g.user_id=? AND g.started>=? AND g.started<? AND r.score IS NOT NULL""", span).fetchall()
+    results = c.execute("""SELECT l.mode, m.result FROM lobby_members m JOIN lobbies l ON l.id=m.lobby_id
+        JOIN games g ON g.lobby_id=l.id AND g.user_id=m.user_id
+        WHERE m.user_id=? AND g.started>=? AND g.started<? AND m.result IS NOT NULL""", span).fetchall()
+    claimed = {r["quest"] for r in c.execute("SELECT quest FROM quest_claims WHERE user_id=? AND day=?", (u["id"], day.isoformat()))}
+    top = cfg("max_round_score")
+    done = [g for g in games if g["done"]]
+    rated = ("ranked", "legend")
+    progress = {
+        "finish_games": len(done),
+        "rounds_played": len(rounds),
+        "close_guesses": sum(r["distance"] < 50 for r in rounds),
+        "duel": sum(g["mode"] == "1v1" for g in done),
+        "team_duel": sum(g["mode"] == "2v2" for g in done),
+        "near_perfect": sum(r["score"] >= 0.99 * top for r in rounds),
+        "points_today": sum(g["total"] for g in games),
+        "win_match": sum(r["result"] == 1 for r in results),
+        "play_ranked": sum(g["mode"] in rated for g in done),
+        "big_game": sum(g["total"] >= 0.8 * g["rounds"] * top for g in done),
+        "win_two": sum(r["result"] == 1 for r in results),
+        "win_ranked": sum(r["result"] == 1 and r["mode"] in rated for r in results),
+    }
+    out = []
+    for k in todays_quests(day):
+        title, tier, target, _ = QUESTS[k]
+        if k == "points_today":
+            target *= top
+        amount, unit = quest_reward(tier, u["legend"])
+        out.append({"key": k, "title": title.format(n=target, pts=f"{target:,}"), "tier": tier, "target": target,
+                    "progress": min(progress[k], target), "done": progress[k] >= target, "claimed": k in claimed,
+                    "reward": amount, "unit": unit})
+    return out
+
+
+def api_quests(h, b):
+    u = h.user()
+    require("quests_enabled", "Daily quests")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    midnight = datetime.datetime.combine(now.date() + datetime.timedelta(days=1), datetime.time(), datetime.timezone.utc)
+    return {"quests": quest_state(u), "resets_in": int((midnight - now).total_seconds())}
+
+
+def api_quest_claim(h, b):
+    u, day = h.user(), utc_today()
+    require("quests_enabled", "Daily quests")
+    q = next((q for q in quest_state(u, day) if q["key"] == b.get("key")), None)
+    if not q:
+        raise Err(404, "That's not one of today's quests")
+    if not q["done"]:
+        raise Err(409, "Finish the quest first")
     col = "mmr" if u["legend"] else "rank_points"
-    with db() as c:
-        if c.execute(f"""UPDATE users SET {col}={col}+?, daily_streak=?, daily_last=?
-                WHERE id=? AND (daily_last IS NULL OR daily_last!=?)""",
-                (reward["amount"], streak, today.isoformat(), u["id"], today.isoformat())).rowcount != 1:
-            raise Err(409, "Already claimed today. Come back tomorrow!")
-    return {**reward, "streak": streak}
+    try:
+        with db() as c:
+            c.execute("INSERT INTO quest_claims VALUES(?,?,?,?)", (u["id"], day.isoformat(), q["key"], q["reward"]))
+            c.execute(f"UPDATE users SET {col}={col}+? WHERE id=?", (q["reward"], u["id"]))
+    except sqlite3.IntegrityError:
+        raise Err(409, "Already claimed")
+    return {"reward": q["reward"], "unit": q["unit"]}
 
 
 def api_legend_enter(h, b):
@@ -852,7 +979,8 @@ def api_my_lobbies(h, b):
 def api_admin_users(h, b):
     h.user(admin=True)
     rows = db().execute("""SELECT u.id, u.username, u.is_admin, u.banned,
-        u.rank_points, u.legend, ROUND(u.mmr) mmr, u.daily_streak,
+        u.rank_points, u.legend, ROUND(u.mmr) mmr,
+        (SELECT COUNT(*) FROM quest_claims q WHERE q.user_id=u.id) quests_done,
         (SELECT COUNT(*) FROM reports r WHERE r.target_id=u.id AND r.status='open') open_reports,
         u.created, u.last_login, u.last_ip, COUNT(g.id) games, SUM(g.done) finished,
         COALESCE(MAX(CASE WHEN g.done THEN g.total END),0) best, COALESCE(SUM(g.total),0) points,
@@ -906,7 +1034,6 @@ ADMIN_FIELDS = {  # column -> validator; keys are fixed, so safe to put in SQL
     "username": valid_username, "is_admin": flag, "banned": flag, "legend": flag,
     "rank_points": lambda v: bounded(int(v), 0, 100_000, "RP"),
     "mmr": lambda v: bounded(float(v), 0, 10_000, "MMR"),
-    "daily_streak": lambda v: bounded(int(v), 0, 100_000, "Streak"),
 }
 CHEAT_FIELDS = {
     "cheat_reveal": flag, "cheat_aim": flag, "cheat_shield": flag,
@@ -1089,7 +1216,8 @@ ROUTES = [
     ("POST", r"/api/admin/report", api_admin_report),
     ("GET", r"/api/admin/cheats", api_admin_cheats),
     ("POST", r"/api/admin/cheats", api_admin_cheats),
-    ("POST", r"/api/daily", api_daily),
+    ("GET", r"/api/quests", api_quests),
+    ("POST", r"/api/quests/claim", api_quest_claim),
     ("POST", r"/api/legend/enter", api_legend_enter),
     ("GET", r"/api/legends", api_legends),
     ("POST", r"/api/lobby", api_lobby_create),
