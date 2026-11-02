@@ -125,6 +125,9 @@
   #v-game { position:fixed; inset:0; background:#000; } #v-game:not(.on) { display:none; }
   #menubtn .avatar { width:34px; height:34px; font-size:15px; }
   #pano { position:absolute; inset:0; }
+  #pano-loading { position:absolute; inset:0; z-index:15; display:grid; place-content:center; justify-items:center; gap:14px; background:var(--bg); color:var(--mute); font-weight:700; }
+  #pano-loading::before { content:""; width:38px; height:38px; border-radius:50%; border:4px solid var(--line); border-top-color:var(--go); animation:spin .8s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
   .hud { position:absolute; top:14px; right:14px; z-index:20; display:flex; border-radius:12px; overflow:hidden; box-shadow:0 6px 18px rgba(0,0,0,.4); }
   .hud div { background:rgba(13,19,33,.88); padding:8px 16px; display:flex; flex-direction:column; align-items:center; border-left:1px solid var(--line); }
   .hud div:first-child { border:0; } .hud span { font-size:11px; color:var(--mute); font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
@@ -326,6 +329,7 @@
 
 <section id="v-game">
   <div id="pano"></div>
+  <div id="pano-loading" class="hidden" role="status">Loading street view…</div>
   <button class="btn ghost sm" id="quit">Leave</button>
   <div id="credit">Imagery © Mapillary contributors, CC BY-SA</div>
   <div class="hud"><div><span>Mode</span><b id="hud-mode"></b></div><div><span>Round</span><b id="hud-round"></b></div><div><span>Score</span><b id="hud-score"></b></div></div>
@@ -775,9 +779,13 @@ function hud() {
 function showPano() {
   // Movement arrows, keyboard and zoom stay on so players can walk around. The built-in attribution is off:
   // its link opens the photo on mapillary.com, which shows where it is (see #credit instead).
-  viewer ??= new mapillary.Viewer({ accessToken: game.token, container: 'pano', component: { cover: false, attribution: false } });
-  viewer.resize();
-  viewer.moveTo(game.image_id).catch(() => toast('This location\'s imagery failed to load. Place your best guess anyway.', true));
+  // A fresh viewer every round: moving one viewer across the world makes MapillaryJS load and animate from the old spot,
+  // which can take ages or stall on the old photo. The cover hides the viewer until the new photo is in.
+  viewer?.remove();
+  const v = viewer = new mapillary.Viewer({ accessToken: game.token, container: 'pano', component: { cover: false, attribution: false } });
+  v.moveTo(game.image_id).then(
+    () => v === viewer && $('#pano-loading').classList.add('hidden'),
+    () => { if (v !== viewer) return; $('#pano-loading').classList.add('hidden'); toast('This location\'s imagery failed to load. Place your best guess anyway.', true); });
 }
 
 function placeGuess(ll) {
@@ -786,13 +794,14 @@ function placeGuess(ll) {
 }
 async function round() {
   show('v-game'); hud();
+  $('#pano-loading').classList.remove('hidden');  // covers the old photo, and the first-game library download
   [guessMarker, peekMarker].forEach(m => m?.remove());
   guessMarker = peekMarker = null;
   $('#guess').disabled = true; $('#guess').textContent = 'Place your pin';
   $('#guessbox').classList.remove('open');
   $('#cheatbar').classList.toggle('hidden', !me.cheat_reveal && !me.cheat_aim);
   $('#peek').classList.toggle('hidden', !me.cheat_reveal); $('#aim').classList.toggle('hidden', !me.cheat_aim);
-  try { await libs(); } catch (e) { return fail(e); }
+  try { await libs(); } catch (e) { $('#pano-loading').classList.add('hidden'); return fail(e); }
   showPano();
   if (!gmap) {
     gmap = newMap($('#gmap'));
