@@ -1,6 +1,6 @@
 # Better Guesser for YunoHost
 
-A self-hosted geography guessing game on **Google Street View**. Players are dropped somewhere in the world, look around, and pin their guess on a map. It's a YunoHost package with no dependencies beyond `python3`: a single-file Python server, SQLite, and one HTML page.
+A self-hosted geography guessing game on real street-level imagery from **Mapillary**. Players are dropped somewhere in the world, walk around, and pin their guess on a map. **Everything is free**: there's no billing account and no paid API. It's a YunoHost package with no dependencies beyond `python3`: a single-file Python server, SQLite, and one HTML page.
 
 ## Install
 
@@ -8,21 +8,17 @@ A self-hosted geography guessing game on **Google Street View**. Players are dro
 sudo yunohost app install https://github.com/gzplaz/better-guesser
 ```
 
-The install asks for the game admin's username and password, and a **Google Maps API key**. You can skip the key at install and paste it later in **Admin → Settings**.
+The install asks for the game admin's username and password, and a **Mapillary client token**. You can skip the token at install and paste it later in **Admin → Settings**.
 
 Leave the access permission on `visitors` so friends can sign up in the game itself, without YunoHost accounts. Install, upgrade, backup, restore, change URL and remove are all supported. Upgrades migrate the database automatically and keep every account and score.
 
-### Getting a Google Maps API key
+### Getting a Mapillary token (free, about 2 minutes)
 
-1. Go to https://console.cloud.google.com/google/maps-apis and create a project. Google requires a billing account on it.
-2. Enable the **Maps JavaScript API** (the Street View viewer and the guess and result maps players see) and the **Street View Static API** (the server uses its free metadata lookup to pick places).
-3. Under **APIs & Services → Credentials**, create an API key and paste it into the install, or into Admin → Settings.
+1. Create a free account at https://www.mapillary.com (no card needed).
+2. Go to https://www.mapillary.com/dashboard/developers and click **Register application**. Any name, description and URL will do, for example your game's address. Tick **Read** access.
+3. Copy the **Client Token**, which starts with `MLY|`, and paste it into the install or into Admin → Settings.
 
-The key ends up in players' browsers, which is how Google Maps works, so **restrict it**:
-- Under *Website restrictions*, allow `https://your.domain/*`.
-- Google refuses website-restricted keys for server-side calls. So create a **second key** restricted by *IP address* to your server, limit it to the Street View Static API, and paste it into **Server key** in Admin → Settings. If you leave Server key empty, the server uses the main key.
-
-**Cost:** Google bills each Street View viewer load beyond a free monthly allowance; each round is one load. Check your current allowance on Google's pricing page, and set a quota cap in the Cloud console so a busy weekend can't surprise you. The server's location lookups use the metadata endpoint, which Google doesn't charge for.
+Client tokens are meant to be used in browsers, so it's fine that players' browsers see it. The maps come from **OpenFreeMap**, which needs no key at all.
 
 ## Game modes
 
@@ -45,11 +41,10 @@ Matchmade games don't wait for everyone to be online: you play straight away, an
   - Quests for modes the admin has switched off never appear.
 - **Reports**: players can report anyone from their profile or from a match, for cheating, an offensive username, harassment, or something else, with an optional note. Each player can have one open report per person, and at most 10 reports a day.
 - Changing your password logs out your other devices. Logins are throttled after 10 failures in 15 minutes from one IP.
-- In-game: full-screen Street View and a Google guess map with shops, stations and other places hidden, so they don't give the answer away.
+- In-game: full-screen street-level imagery. **Walk around freely** with the on-screen arrows or your keyboard, and look around 360° wherever there's a panorama. The guess map hides shops, stations and other places, so they don't give the answer away.
   - The guess map grows when you hover over it. Use − and + to pick its size, and the pin to keep it open. Both choices are remembered.
-  - On phones, the map sits behind a Map button so it doesn't cover the street view.
+  - On phones, the map sits behind a Map button so it doesn't cover the imagery.
   - Press Space or Enter to guess. After each round, the result map shows a dashed great-circle line from your pin to the answer, and the end-of-game summary shows every round numbered.
-  - Each browser session uses one guess map and one result map, which count toward Google's free Dynamic Maps allowance.
 
 ## Admin panel
 
@@ -75,7 +70,7 @@ Log in as an admin and open **Admin** from the account menu. The admin panel con
 - **Locations**: the list of city centres rounds are drawn from (latitude, longitude per line), with about 260 cities on every continent built in. One click returns to that built-in list. Under Game rules:
   - **City rounds**: the chance a round lands in town (default 85%, within 4 km of a city centre).
   - **Countryside spread**: how far out the other rounds can land (default 40 km), so forests, fields and jungle stay rare.
-- **Settings**: the announcement banner (shown to everyone, including on the login page), the Google Maps API key (plus an optional server key), and whether sign-ups are open.
+- **Settings**: the announcement banner (shown to everyone, including on the login page), the Mapillary token, and whether sign-ups are open.
   - The **Danger zone** can reset the season (all RP, Legend status and MMR), wipe all matches, or wipe all reports. Each needs you to type the action's name to confirm.
 - **My cheats**: admin-only, and they apply only to your own account, in every mode. Nobody can switch cheats on for someone else, and demoting an admin switches their cheats off.
   - **Peek**: an eye button shows a small dot on the real location.
@@ -88,6 +83,6 @@ Log in as an admin and open **Admin** from the account menu. The admin panel con
 ## Layout
 
 - `src/app.py`: the server (Python stdlib, SQLite in the app's data dir)
-- `src/index.html`: the whole frontend (Google Maps JS for Street View and both maps)
+- `src/index.html`: the whole frontend (MapillaryJS for the imagery, MapLibre with OpenFreeMap for both maps; loaded on the first game)
 - `scripts/`, `conf/`, `manifest.toml`: YunoHost packaging (v2, helpers 2.1)
 - `tests/test_app.py`: an end-to-end self-check. Run it with `python3 tests/test_app.py`.

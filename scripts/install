@@ -7,7 +7,7 @@ ynh_script_progression "Installing app code..."
 _install_app_code
 
 ynh_script_progression "Creating the database and admin account..."
-BG_DB="$data_dir/game.db" python3 "$install_dir/app.py" init "$admin_name" "${google_maps_key:-}" <<< "$admin_password"
+BG_DB="$data_dir/game.db" python3 "$install_dir/app.py" init "$admin_name" "${mapillary_token:-}" <<< "$admin_password"
 chown -R "$app:$app" "$data_dir"
 chmod 750 "$data_dir"
 

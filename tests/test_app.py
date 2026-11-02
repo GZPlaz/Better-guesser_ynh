@@ -1,5 +1,5 @@
-"""End-to-end self-check: python3 tests/test_app.py (no network; Google Street View is stubbed)."""
-import http.cookiejar, io, itertools, json, sqlite3, os, sys, tempfile, threading, urllib.error, urllib.request
+"""End-to-end self-check: python3 tests/test_app.py (no network; Mapillary is stubbed)."""
+import http.cookiejar, io, itertools, json, sqlite3, os, sys, tempfile, threading, urllib.error, urllib.parse, urllib.request
 
 os.environ["BG_DB"] = os.path.join(tempfile.mkdtemp(), "t.db")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -478,16 +478,14 @@ boss("admin/danger", {"action": "wipe_matches", "confirm": "wipe_matches"})
 assert all(u["games"] == 0 for u in boss("admin/users")["users"])
 
 # settings + closed sign-ups
-boss("admin/settings", {"google_key": "browser-key", "registration_open": False})
-assert boss("admin/settings") == {"google_key": "browser-key", "google_server_key": "", "registration_open": False, "announcement": "Season 2 starts Monday"}
-assert app.server_key() == "browser-key"  # falls back to the browser key
-boss("admin/settings", {"google_server_key": "server-key"})
-assert app.server_key() == "server-key" and app.browser_key() == "browser-key"
-assert not any(k in (e["detail"] or "") for e in boss("admin/log")["log"] for k in ("browser-key", "server-key"))  # keys never logged
+boss("admin/settings", {"mapillary_token": "MLY|secret", "registration_open": False})
+assert boss("admin/settings") == {"mapillary_token": "MLY|secret", "registration_open": False, "announcement": "Season 2 starts Monday"}
+assert not any("MLY|secret" in (e["detail"] or "") for e in boss("admin/log")["log"])  # the token is never logged
 
-# real pick_location against fake Google responses: skips empty spots and user photo spheres
-answers = iter([{"status": "ZERO_RESULTS"}, {"status": "OK", "copyright": "© Some Hiker", "pano_id": "user", "location": {"lat": 1, "lng": 2}},
-                {"status": "OK", "copyright": "© 2024 Google", "pano_id": "PANO123", "location": {"lat": 48.1, "lng": 11.5}}])
+# real pick_location against fake Mapillary responses: retries empty areas, prefers 360° panoramas
+answers = iter([{"data": []}, {"data": [{"id": "flat", "geometry": {"coordinates": [2, 1]}},
+                                        {"id": "PANO", "is_pano": True, "geometry": {"coordinates": [11.4, 48.0]},
+                                         "computed_geometry": {"coordinates": [11.5, 48.1]}}]}])
 seen = []
 
 
@@ -498,18 +496,23 @@ class FakeResp(io.BytesIO):
 
 def fake_urlopen(url, timeout=None):
     seen.append(url)
-    return FakeResp(json.dumps(next(answers)).encode())
+    a = next(answers)
+    if isinstance(a, Exception):
+        raise a
+    return FakeResp(json.dumps(a).encode())
 
 
 app.urllib.request.urlopen = fake_urlopen
-assert real_pick("K") == ("PANO123", 48.1, 11.5)
-assert len(seen) == 3 and "key=K" in seen[0] and "source=outdoor" in seen[0] and "maps.googleapis.com/maps/api/streetview/metadata" in seen[0]
-answers = iter([{"status": "REQUEST_DENIED", "error_message": "API key invalid"}])
+assert real_pick("MLY|t") == ("PANO", 48.1, 11.5)  # the pano, at its corrected (computed) position
+assert len(seen) == 2 and "graph.mapillary.com/images" in seen[0] and "access_token=MLY%7Ct" in seen[0]
+bbox = [float(x) for x in urllib.parse.parse_qs(urllib.parse.urlsplit(seen[0]).query)["bbox"][0].split(",")]
+assert bbox[2] - bbox[0] <= 2 * 2500 / 111_000 + 1e-6 and bbox[3] - bbox[1] <= 2 * 2500 / 111_000 + 1e-6  # Mapillary's bbox limit
+answers = iter([urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)])
 try:
     real_pick("bad")
     raise AssertionError("expected an error")
 except app.Err as e:
-    assert e.code == 502 and "REQUEST_DENIED" in e.msg and "API key invalid" in e.msg
+    assert e.code == 502 and "401" in e.msg and "token" in e.msg
 client()("register", {"username": "eve", "password": "secret1"}, expect=403)
 
 # ---- login throttling (last: it locks out this IP) ----

@@ -141,6 +141,11 @@
   #guessbox:hover .mapctl, #guessbox.keep .mapctl { opacity:1; transition-delay:0s; }
   .mapctl button { background:rgba(13,19,33,.9); border:0; color:var(--fg); border-radius:8px; padding:6px; cursor:pointer; display:flex; }
   .mapctl button:hover { background:var(--panel2); } .mapctl button.on { color:var(--go); }
+  #gmap .maplibregl-canvas-container.maplibregl-interactive { cursor:crosshair; }
+  .maplibregl-ctrl-group { background:rgba(13,19,33,.9) !important; } .maplibregl-ctrl-group button .maplibregl-ctrl-icon { filter:invert(1); }
+  .mapnum { background:var(--go); color:#062a1c; border-radius:50%; width:24px; height:24px; display:grid; place-items:center; font-weight:900; font-size:12px; border:2.5px solid #fff; }
+  .peekdot { width:9px; height:9px; border-radius:50%; background:#ff4fd8; opacity:.8; }
+  #credit { position:absolute; left:14px; top:54px; z-index:20; font-size:11px; color:#fff; text-shadow:0 1px 2px #000; opacity:.75; }
   .guessrow { display:flex; gap:8px; } .guessrow #guess { flex:1; } #maptoggle { display:none; }
 
   #guess { width:100%; }
@@ -322,6 +327,7 @@
 <section id="v-game">
   <div id="pano"></div>
   <button class="btn ghost sm" id="quit">Leave</button>
+  <div id="credit">Imagery © Mapillary contributors, CC BY-SA</div>
   <div class="hud"><div><span>Mode</span><b id="hud-mode"></b></div><div><span>Round</span><b id="hud-round"></b></div><div><span>Score</span><b id="hud-score"></b></div></div>
   <div class="cheatbar hidden" id="cheatbar">
     <button id="peek" title="Peek: show the answer" aria-label="Peek"></button>
@@ -710,22 +716,37 @@ $('#lobby').addEventListener('click', async e => {
 });
 
 // ---------- game ----------
-// Both maps are Google maps (same key as Street View), without shops, stations or other places of interest: they'd give the answer away.
-const MAP_OPTS = { center: { lat: 20, lng: 0 }, zoom: 1, minZoom: 1, disableDefaultUI: true, zoomControl: true, clickableIcons: false,
-  gestureHandling: 'greedy', keyboardShortcuts: false, backgroundColor: '#aad3df',
-  styles: [{ featureType: 'poi', stylers: [{ visibility: 'off' }] }, { featureType: 'transit', stylers: [{ visibility: 'off' }] }] };
-let G = null;  // the Google Maps classes we use, loaded once
-async function maps() {
-  await loadGoogle(game.key);
-  if (!G) {
-    const [core, m, mk] = await Promise.all(['core', 'maps', 'marker'].map(l => google.maps.importLibrary(l)));
-    G = { Map: m.Map, Polyline: m.Polyline, Marker: mk.Marker, LatLngBounds: core.LatLngBounds, Size: core.Size, Point: core.Point, SymbolPath: core.SymbolPath, event: core.event };
-  }
-  return G;
+// Imagery: Mapillary (free; the admin sets a token). Maps: OpenFreeMap vector tiles drawn by MapLibre (free, no key).
+// Both libraries load on the first game, so the other pages stay light.
+const MAP_STYLE = 'https://tiles.openfreemap.org/styles/liberty';
+const load = (tag, attrs) => new Promise((ok, no) => {
+  const el = Object.assign(document.createElement(tag), attrs);
+  el.onload = ok; el.onerror = () => no(new Error('Could not load the game. Check your connection.'));
+  document.head.append(el);
+});
+let libsReady = null;
+const libs = () => libsReady ??= Promise.all([
+  load('link', { rel: 'stylesheet', href: 'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css' }),
+  load('link', { rel: 'stylesheet', href: 'https://unpkg.com/mapillary-js@4.1.2/dist/mapillary.css' }),
+  load('script', { src: 'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js' }),
+  load('script', { src: 'https://unpkg.com/mapillary-js@4.1.2/dist/mapillary.js' }),
+]).catch(e => { libsReady = null; throw e; });
+function newMap(el) {
+  const m = new maplibregl.Map({ container: el, style: MAP_STYLE, center: [0, 20], zoom: 0.6, dragRotate: false, pitchWithRotate: false, touchPitch: false, attributionControl: false });
+  m.touchZoomRotate.disableRotation();
+  m.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
+  m.addControl(new maplibregl.AttributionControl({ compact: true }));
+  new ResizeObserver(() => m.resize()).observe(el);
+  m.ready = new Promise(ok => m.once('load', () => {
+    // no shops, stations or other places of interest: they'd give the answer away
+    m.getStyle().layers.filter(l => l.id.startsWith('poi')).forEach(l => m.removeLayer(l.id));
+    ok();
+  }));
+  return m;
 }
-const svgIcon = (svg, w, h, ax, ay) => ({ url: 'data:image/svg+xml,' + encodeURIComponent(svg), scaledSize: new G.Size(w, h), anchor: new G.Point(ax, ay) });
-const pinIcon = color => svgIcon(`<svg xmlns="http://www.w3.org/2000/svg" width="26" height="34" viewBox="0 0 26 34"><path d="M13 33S1 20.5 1 12.5a12 12 0 0 1 24 0C25 20.5 13 33 13 33z" fill="${color}" stroke="#fff" stroke-width="2"/><circle cx="13" cy="12.5" r="4.5" fill="#fff"/></svg>`, 26, 34, 13, 34);
-const numIcon = n => svgIcon(`<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26"><circle cx="13" cy="13" r="11" fill="#29d398" stroke="#fff" stroke-width="2.5"/><text x="13" y="17.5" text-anchor="middle" font-family="system-ui,sans-serif" font-size="12" font-weight="900" fill="#062a1c">${n}</text></svg>`, 26, 26, 13, 13);
+const pinEl = color => Object.assign(document.createElement('div'), { innerHTML: `<svg width="26" height="34" viewBox="0 0 26 34" style="display:block"><path d="M13 33S1 20.5 1 12.5a12 12 0 0 1 24 0C25 20.5 13 33 13 33z" fill="${color}" stroke="#fff" stroke-width="2"/><circle cx="13" cy="12.5" r="4.5" fill="#fff"/></svg>` });
+const numEl = n => Object.assign(document.createElement('div'), { className: 'mapnum', textContent: n });
+const mark = (el, lngLat, map, anchor = 'bottom') => new maplibregl.Marker({ element: el, anchor }).setLngLat(lngLat).addTo(map);
 // per-viewer map preferences; storage can be unavailable (private mode), so never rely on it
 const pref = { get: (k, d) => { try { return localStorage.getItem(k) ?? d; } catch { return d; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
 const MAP_SIZES = [[440, 310], [600, 430], [860, 600], [1300, 860]];
@@ -751,65 +772,46 @@ function hud() {
   $('#hud-round').textContent = `${game.round ?? game.rounds} / ${game.rounds}`;
   $('#hud-score').textContent = fmt(game.total);
 }
-// Google Maps JS is loaded on first play, with the key the admin set.
-let googleReady = null;
-function loadGoogle(key) {
-  return googleReady ??= new Promise((ok, no) => {
-    window.__gmReady = ok;
-    const sc = document.createElement('script');
-    sc.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&loading=async&callback=__gmReady`;
-    sc.onerror = () => { googleReady = null; no(new Error('Could not load Google Maps. Check your connection.')); };
-    document.head.append(sc);
-  });
-}
-window.gm_authFailure = () => toast('Google rejected the Maps API key. An admin needs to check it in Admin → Settings.', true);
-
-async function showPano() {
-  await loadGoogle(game.key);
-  const pov = { heading: Math.random() * 360, pitch: 0 };
-  if (!viewer) {
-    const { StreetViewPanorama } = await google.maps.importLibrary('streetView');
-    // No address box, road labels or close button: they'd give the location away.
-    viewer = new StreetViewPanorama($('#pano'), {
-      pano: game.image_id, pov, zoom: 0, addressControl: false, showRoadLabels: false, fullscreenControl: false,
-      motionTracking: false, motionTrackingControl: false, enableCloseButton: false, linksControl: true, panControl: true, zoomControl: true,
-    });
-    viewer.addListener('status_changed', () => viewer.getStatus() !== 'OK' && toast('This location\'s imagery failed to load. Place your best guess anyway.', true));
-  } else { viewer.setPano(game.image_id); viewer.setPov(pov); viewer.setZoom(0); }
+function showPano() {
+  // Movement arrows, keyboard and zoom stay on so players can walk around. The built-in attribution is off:
+  // its link opens the photo on mapillary.com, which shows where it is (see #credit instead).
+  viewer ??= new mapillary.Viewer({ accessToken: game.token, container: 'pano', component: { cover: false, attribution: false } });
+  viewer.resize();
+  viewer.moveTo(game.image_id).catch(() => toast('This location\'s imagery failed to load. Place your best guess anyway.', true));
 }
 
 function placeGuess(ll) {
-  guessMarker ? guessMarker.setPosition(ll) : (guessMarker = new G.Marker({ map: gmap, position: ll, icon: pinIcon('#29d398'), clickable: false }));
+  guessMarker ? guessMarker.setLngLat(ll) : (guessMarker = mark(pinEl('#29d398'), ll, gmap));
   $('#guess').disabled = false; $('#guess').textContent = 'Guess';
 }
 async function round() {
   show('v-game'); hud();
-  [guessMarker, peekMarker].forEach(m => m?.setMap(null));
+  [guessMarker, peekMarker].forEach(m => m?.remove());
   guessMarker = peekMarker = null;
   $('#guess').disabled = true; $('#guess').textContent = 'Place your pin';
   $('#guessbox').classList.remove('open');
   $('#cheatbar').classList.toggle('hidden', !me.cheat_reveal && !me.cheat_aim);
   $('#peek').classList.toggle('hidden', !me.cheat_reveal); $('#aim').classList.toggle('hidden', !me.cheat_aim);
-  try { await maps(); } catch (e) { return fail(e); }
-  showPano().catch(fail);
+  try { await libs(); } catch (e) { return fail(e); }
+  showPano();
   if (!gmap) {
-    gmap = new G.Map($('#gmap'), { ...MAP_OPTS, draggableCursor: 'crosshair' });
-    gmap.addListener('click', e => placeGuess(e.latLng.toJSON()));
+    gmap = newMap($('#gmap'));
+    gmap.on('click', e => placeGuess(e.lngLat.wrap()));
   }
-  gmap.setCenter(MAP_OPTS.center); gmap.setZoom(1);
+  gmap.jumpTo({ center: [0, 20], zoom: 0.6 });
 }
 $('#peek').innerHTML = ic('eye'); $('#aim').innerHTML = ic('target');
 $('#peek').onclick = async () => {
   const a = await api(`game/${game.id}/peek`);
-  peekMarker?.setMap(null);
-  peekMarker = new G.Marker({ map: gmap, position: a, clickable: false, icon: { path: G.SymbolPath.CIRCLE, scale: 4, fillColor: '#ff4fd8', fillOpacity: .8, strokeWeight: 0 } });
+  peekMarker?.remove();
+  peekMarker = mark(Object.assign(document.createElement('div'), { className: 'peekdot' }), a, gmap, 'center');
 };
 // Aimbot: drop the pin a believable 2-40 km off the answer, so it doesn't look like a perfect score every time.
 $('#aim').onclick = async () => {
   const a = await api(`game/${game.id}/peek`), km = 2 + Math.random() * 38, dir = Math.random() * 2 * Math.PI;
   const ll = { lat: a.lat + km / 111 * Math.cos(dir), lng: a.lng + km / (111 * Math.cos(a.lat * Math.PI / 180)) * Math.sin(dir) };
   placeGuess(ll);
-  gmap.setCenter(ll); gmap.setZoom(5);
+  gmap.jumpTo({ center: ll, zoom: 5 });
 };
 $('#quit').innerHTML = ic('x', 16) + 'Leave';
 $('#quit').onclick = async () => {
@@ -821,36 +823,59 @@ document.addEventListener('keydown', e => {
   else if ($('#v-result').classList.contains('on') && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); $('#next')?.click(); }
 });
 
-let rItems = [];
-function resultMap() {
-  rmap ??= new G.Map($('#rmap'), MAP_OPTS);
-  rItems.forEach(x => x.setMap(null));
-  rItems = [];
+let rMarkers = [];
+async function resultMap() {
+  rmap ??= newMap($('#rmap'));
+  await rmap.ready;
+  if (!rmap.getSource('lines')) {
+    rmap.addSource('lines', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    rmap.addLayer({ id: 'lines', type: 'line', source: 'lines', layout: { 'line-cap': 'round' },
+                    paint: { 'line-color': '#0d1321', 'line-width': 3, 'line-dasharray': [0.1, 2] } });
+  }
+  rMarkers.forEach(m => m.remove());
+  rMarkers = [];
+  rmap.resize();
 }
-function drawPair(g, a, n) {
-  // dashed great-circle line from the guess to the answer
-  rItems.push(new G.Polyline({ map: rmap, path: [g, a], geodesic: true, strokeOpacity: 0,
-    icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, strokeColor: '#0d1321', strokeWeight: 3, scale: 3 }, offset: '0', repeat: '14px' }] }));
-  rItems.push(new G.Marker({ map: rmap, position: g, icon: pinIcon('#29d398'), clickable: false }));
-  rItems.push(new G.Marker({ map: rmap, position: a, icon: n ? numIcon(n) : pinIcon('#ff5d73'), clickable: false }));
+function gcPath(a, b, steps = 48) {
+  // great-circle points from a to b, with continuous longitudes so date-line crossings don't wrap around the world
+  const R = Math.PI / 180, [p1, l1, p2, l2] = [a.lat * R, a.lng * R, b.lat * R, b.lng * R];
+  const d = 2 * Math.asin(Math.sqrt(Math.sin((p2 - p1) / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin((l2 - l1) / 2) ** 2));
+  if (Math.sin(d) < 1e-9) return [[a.lng, a.lat], [b.lng, b.lat]];
+  const pts = [];
+  for (let i = 0; i <= steps; i++) {
+    const A = Math.sin((1 - i / steps) * d) / Math.sin(d), B = Math.sin(i / steps * d) / Math.sin(d);
+    const x = A * Math.cos(p1) * Math.cos(l1) + B * Math.cos(p2) * Math.cos(l2), y = A * Math.cos(p1) * Math.sin(l1) + B * Math.cos(p2) * Math.sin(l2);
+    let lng = Math.atan2(y, x) / R;
+    const lat = Math.atan2(A * Math.sin(p1) + B * Math.sin(p2), Math.hypot(x, y)) / R;
+    if (pts.length) { const prev = pts[pts.length - 1][0]; while (lng - prev > 180) lng -= 360; while (lng - prev < -180) lng += 360; }
+    pts.push([lng, lat]);
+  }
+  return pts;
+}
+function drawPairs(pairs) {
+  // pairs: [{ g: guess, a: answer, n: round number or undefined }]. Returns every point drawn, for fitting the view.
+  const paths = pairs.map(p => gcPath(p.g, p.a));
+  rmap.getSource('lines').setData({ type: 'FeatureCollection', features: paths.map(c => ({ type: 'Feature', geometry: { type: 'LineString', coordinates: c } })) });
+  pairs.forEach((p, i) => {
+    const path = paths[i];
+    rMarkers.push(mark(pinEl('#29d398'), path[0], rmap), mark(p.n ? numEl(p.n) : pinEl('#ff5d73'), path[path.length - 1], rmap, p.n ? 'center' : 'bottom'));
+  });
+  return paths.flat();
 }
 function fit(points, maxZoom) {
-  const b = new G.LatLngBounds();
+  const b = new maplibregl.LngLatBounds();
   points.forEach(p => b.extend(p));
-  rmap.fitBounds(b, 60);
-  G.event.addListenerOnce(rmap, 'idle', () => rmap.getZoom() > maxZoom && rmap.setZoom(maxZoom));
+  rmap.fitBounds(b, { padding: 60, maxZoom, duration: 0 });
 }
 $('#guess').onclick = async () => {
   $('#guess').disabled = true;
-  const p = guessMarker.getPosition(), ll = { lat: p.lat(), lng: p.lng() };
+  const ll = guessMarker.getLngLat().wrap();
   let r;
   try { r = await api(`game/${game.id}/guess`, { lat: ll.lat, lng: ll.lng }); }
   catch (e) { fail(e); $('#guess').disabled = false; return; }
   game.total = r.total; game.done = r.done;
   show('v-result');
-  resultMap();
-  drawPair(r.guess, r.answer);
-  fit([r.guess, r.answer], 13);
+  resultMap().then(() => fit(drawPairs([{ g: r.guess, a: r.answer }]), 13)).catch(fail);
   $('#resultbar').innerHTML = `<div class="mute display" style="font-size:13px">Round ${game.round} of ${game.rounds}</div>
     <div class="pts">${fmt(r.score)} <span style="font-size:20px">points</span></div>
     <div class="bar"><i style="width:0"></i></div>
@@ -869,10 +894,7 @@ $('#resultbar').addEventListener('click', async e => {
 });
 function summary() {
   show('v-result');
-  resultMap();
-  const pts = [];
-  game.history.forEach(h => { const g = { lat: h.guess_lat, lng: h.guess_lng }, a = { lat: h.lat, lng: h.lng }; drawPair(g, a, h.n); pts.push(g, a); });
-  fit(pts, 6);
+  resultMap().then(() => fit(drawPairs(game.history.map(h => ({ g: { lat: h.guess_lat, lng: h.guess_lng }, a: { lat: h.lat, lng: h.lng }, n: h.n }))), 6)).catch(fail);
   $('#resultbar').innerHTML = `<div class="mute display" style="font-size:13px">${MODES[game.mode] || 'Practice'} · final score</div>
     <div class="pts">${fmt(game.total)} <span style="font-size:20px">/ ${fmt(game.rounds * server.max_round_score)}</span></div>
     <div class="bar"><i style="width:0"></i></div>
@@ -984,17 +1006,15 @@ async function adminSettings() {
   $('#admin').innerHTML = `<div class="grid" style="max-width:720px"><div class="panel"><form id="settings" class="grid">
     <label class="grid" style="gap:6px"><b>Announcement</b><span class="mute small">Shown in a banner to everyone, including on the login page. Leave empty to hide it.</span>
       <textarea id="s-ann" rows="2" maxlength="500">${esc(s.announcement)}</textarea></label>
-    <label class="grid" style="gap:6px"><b>Google Maps API key</b><span class="mute small">From Google Cloud Console → APIs &amp; Services → Credentials, with the <b>Maps JavaScript API</b> and <b>Street View Static API</b> enabled.
-      Players' browsers use it, so restrict it to your site under <i>Website restrictions</i>.</span><input id="s-key" value="${esc(s.google_key)}" autocomplete="off"></label>
-    <label class="grid" style="gap:6px"><b>Server key</b> <span class="mute small">Optional. Google refuses website-restricted keys for server lookups, so if you restricted the key above, add a second key here restricted to your server's IP. Empty = use the key above.</span>
-      <input id="s-skey" value="${esc(s.google_server_key)}" autocomplete="off"></label>
+    <label class="grid" style="gap:6px"><b>Mapillary client token</b><span class="mute small">Free, no billing: sign in at mapillary.com/dashboard/developers, register an app, and copy its Client Token (starts with MLY|).</span>
+      <input id="s-token" value="${esc(s.mapillary_token)}" autocomplete="off"></label>
     <div class="switch"><div><b>Open sign-ups</b><small>Let anyone create an account. Turn off to freeze the player list.</small></div><input type="checkbox" class="toggle" id="s-reg" ${s.registration_open ? 'checked' : ''} aria-label="Open sign-ups"></div>
     <div><button class="btn">Save settings</button></div></form></div>
     <div class="panel danger-zone"><h2 style="color:var(--bad);margin-bottom:6px">Danger zone</h2><p class="mute" style="margin-top:0">These can't be undone. Back up the app in YunoHost first.</p>
       ${Object.entries(danger).map(([k, v]) => `<div class="switch"><div><b style="text-transform:capitalize">${k.replace('_', ' ')}</b><small>${esc(v)}</small></div><button class="btn sm danger" data-danger="${k}">Run</button></div>`).join('')}</div></div>`;
   $('#settings').onsubmit = async e => {
     e.preventDefault();
-    try { await api('admin/settings', { announcement: $('#s-ann').value, google_key: $('#s-key').value, google_server_key: $('#s-skey').value, registration_open: $('#s-reg').checked }); toast('Settings saved'); refreshMe(); }
+    try { await api('admin/settings', { announcement: $('#s-ann').value, mapillary_token: $('#s-token').value, registration_open: $('#s-reg').checked }); toast('Settings saved'); refreshMe(); }
     catch (err) { fail(err); }
   };
   $('#admin').onclick = e => {
