@@ -285,7 +285,7 @@ def new_session(h, uid):
         c.execute("INSERT INTO sessions VALUES(?,?,?)", (tok, uid, now + cfg("session_days") * 86400))
         c.execute("UPDATE users SET last_login=?, last_ip=? WHERE id=?", (now, h.client_ip(), uid))
     secure = "; Secure" if h.headers.get("X-Forwarded-Proto") == "https" else ""
-    return {"ok": True}, f"{COOKIE}={tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age={cfg("session_days") * 86400}{secure}"
+    return {"ok": True}, f"{COOKIE}={tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age={cfg('session_days') * 86400}{secure}"
 
 
 def api_register(h, b):

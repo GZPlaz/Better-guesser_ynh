@@ -1,0 +1,13 @@
+name: test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 3.11 = Debian bookworm (YunoHost 12). Newer Pythons accept syntax that crashes there.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python tests/test_app.py
+      - run: bash -n scripts/*
