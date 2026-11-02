@@ -18,7 +18,9 @@ Leave the access permission on `visitors` so friends can sign up in the game its
 2. Go to https://www.mapillary.com/dashboard/developers and click **Register application**. Any name, description and URL will do, for example your game's address. Tick **Read** access.
 3. Copy the **Client Token**, which starts with `MLY|`, and paste it into the install or into Admin → Settings.
 
-Client tokens are meant to be used in browsers, so it's fine that players' browsers see it. The maps come from **OpenFreeMap**, which needs no key at all.
+The token stays on your server. The maps come from **OpenFreeMap**, which needs no key at all.
+
+**Works on school and work networks.** Players' browsers never contact Mapillary or Facebook's servers (Mapillary photos are served from `fbcdn.net`, which many school filters block). Your server fetches the data and photos and passes them on, so players only need to reach your own domain. This uses your server's bandwidth, roughly 1 to 5 MB per round.
 
 ## Game modes
 
@@ -44,6 +46,7 @@ Matchmade games don't wait for everyone to be online: you play straight away, an
 - In-game: full-screen street-level imagery. **Walk around freely** with the on-screen arrows or your keyboard, and look around 360° wherever there's a panorama. The guess map hides shops, stations and other places, so they don't give the answer away.
   - The guess map grows when you hover over it. Use − and + to pick its size, and the pin to keep it open. Both choices are remembered.
   - On phones, the map sits behind a Map button so it doesn't cover the imagery.
+  - **Nobody guesses blind**: Guess unlocks only once the round's photo has loaded. If a photo won't load, the game tries it again, then swaps in a different location automatically. That's limited to 3 swaps per game, so it can't be used to skip hard rounds. In a lobby, players who haven't reached that round yet get the working photo too.
   - Press Space or Enter to guess. After each round, the result map shows a dashed great-circle line from your pin to the answer, and the end-of-game summary shows every round numbered.
 
 ## Admin panel

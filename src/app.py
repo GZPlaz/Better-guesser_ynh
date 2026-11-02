@@ -56,6 +56,7 @@ CONFIG = {
     "maintenance": (False, None, None, "Modes & features", "Maintenance mode", "Only admins can start new games. Games in progress can finish."),
 }
 REPORT_REASONS = {"cheating": "Cheating", "name": "Offensive username", "abuse": "Harassment or abuse", "other": "Other"}
+MAX_SWAPS = 3  # per game: enough for genuinely broken photos, too few to dodge hard rounds
 SEATS = {"ranked": 2, "legend": 2, "1v1": 2, "2v2": 4}  # players per match; private lobbies are full by the time they start
 
 # City centres with good Mapillary street-level coverage. Most rounds land in town (see city_chance); some in the countryside around it.
@@ -164,6 +165,7 @@ MIGRATIONS = [
      "UPDATE users SET cheat_reveal=0, cheat_aim=0, cheat_shield=0, cheat_floor=0, cheat_multiplier=1 WHERE is_admin=0"),
     ("games", "rounds", "INTEGER NOT NULL DEFAULT 5"),  # v0.6: rounds are configurable, fixed per game/lobby
     ("lobbies", "rounds", "INTEGER NOT NULL DEFAULT 5"),
+    ("games", "swaps", "INTEGER NOT NULL DEFAULT 0"),  # v0.10: locations swapped because their imagery wouldn't load
 ]
 
 
@@ -317,7 +319,7 @@ def pick_location(token):
     for _ in range(15):
         lat, lng, radius_m = pick_point()
         d = min(radius_m, 2500) / 111_000  # Mapillary rejects big bounding boxes
-        q = urllib.parse.urlencode({"access_token": token, "fields": "id,geometry,computed_geometry,is_pano", "limit": 50,
+        q = urllib.parse.urlencode({"access_token": token, "fields": "id,geometry,computed_geometry,is_pano,thumb_1024_url", "limit": 50,
                                     "bbox": f"{lng - d:.6f},{lat - d:.6f},{lng + d:.6f},{lat + d:.6f}"})
         try:
             with urllib.request.urlopen(f"https://graph.mapillary.com/images?{q}", timeout=10) as r:
@@ -328,7 +330,8 @@ def pick_location(token):
             continue
         except (OSError, ValueError):
             continue
-        imgs = [i for i in imgs if i.get("computed_geometry") or i.get("geometry")]
+        # no thumbnail = Mapillary hasn't finished processing it, and the viewer can't load it
+        imgs = [i for i in imgs if (i.get("computed_geometry") or i.get("geometry")) and i.get("thumb_1024_url")]
         if imgs:
             panos = [i for i in imgs if i.get("is_pano")]
             img = random.choice(panos or imgs)  # 360° panoramas when the area has them
@@ -444,7 +447,7 @@ def game_state(u, gid):
         WHERE game_id=? AND score IS NOT NULL ORDER BY n""", (gid,)).fetchall()  # only finished rounds, so no answers leak
     lb = c.execute("SELECT code, mode FROM lobbies WHERE id=?", (g["lobby_id"],)).fetchone() if g["lobby_id"] else None
     state = {"id": g["id"], "rounds": g["rounds"], "lobby": lb["code"] if lb else None, "mode": lb["mode"] if lb else "solo", "total": g["total"], "done": bool(g["done"]),
-             "history": [dict(r) for r in played], "token": token()}
+             "history": [dict(r) for r in played], "swaps_left": MAX_SWAPS - g["swaps"]}
     if g["done"]:
         return state
     n = len(played) + 1
@@ -729,6 +732,85 @@ def api_legends(h, b):
         (SELECT COUNT(*) FROM lobby_members m JOIN lobbies l ON l.id=m.lobby_id WHERE m.user_id=u.id AND l.mode='legend' AND l.settled=1) matches
         FROM users u WHERE u.legend=1 AND u.banned=0 ORDER BY u.mmr DESC, u.username LIMIT 100""").fetchall()
     return {"rows": [dict(r) for r in rows]}
+
+
+def api_swap(h, b, gid):
+    """The browser couldn't load this round's photo: put a different location in its place, so nobody guesses blind."""
+    u = h.user()
+    r = open_round(u, gid)
+    g = db().execute("SELECT swaps, lobby_id FROM games WHERE id=?", (r["game_id"],)).fetchone()
+    if g["swaps"] >= MAX_SWAPS:
+        raise Err(429, "Street imagery keeps failing to load. Check your connection, then try again.")
+    image_id, lat, lng = pick_location(token())  # network call, outside any transaction
+    with db() as c:
+        if c.execute("UPDATE rounds SET image_id=?, lat=?, lng=? WHERE game_id=? AND n=? AND score IS NULL",
+                     (image_id, lat, lng, r["game_id"], r["n"])).rowcount != 1:
+            raise Err(409, "Already guessed")
+        if g["lobby_id"]:  # players who haven't reached this round yet get the working photo too
+            c.execute("UPDATE lobby_rounds SET image_id=?, lat=?, lng=? WHERE lobby_id=? AND n=?", (image_id, lat, lng, g["lobby_id"], r["n"]))
+        c.execute("UPDATE games SET swaps=swaps+1 WHERE id=?", (r["game_id"],))
+    return game_state(u, r["game_id"])
+
+
+# ---- Mapillary proxy: the browser loads all imagery through this server, so networks that block
+# Mapillary or Facebook's CDN (common at schools) still work, and the token never leaves the server. ----
+MLY_MEDIA_HOSTS = (".fbcdn.net", ".mapillary.com")
+
+
+class Raw:
+    def __init__(self, body, ctype, status=200, cache=None):
+        self.body, self.ctype, self.status, self.cache = body, ctype, status, cache
+
+
+def media_ok(url):
+    p = urllib.parse.urlsplit(url)
+    return p.scheme == "https" and (p.hostname or "").endswith(MLY_MEDIA_HOSTS)
+
+
+def proxied(v):
+    """Point every Mapillary media URL in an API response at our media proxy (relative, so sub-paths work)."""
+    if isinstance(v, dict):
+        return {k: proxied(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [proxied(x) for x in v]
+    if isinstance(v, str) and media_ok(v):
+        return "api/mly/media?u=" + urllib.parse.quote(v, safe="")
+    return v
+
+
+def mly_fetch(url, headers=None, media=False):
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers or {}), timeout=20) as r:
+            if media and not media_ok(r.geturl()):  # never follow a redirect off Mapillary's hosts
+                raise Err(502, "Unexpected redirect")
+            return r.status, r.headers.get("Content-Type", "application/octet-stream"), r.read(50_000_000)
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers.get("Content-Type", "application/json"), e.read(100_000)
+    except OSError:
+        raise Err(502, "The game server couldn't reach Mapillary")
+
+
+def query_of(h):
+    return urllib.parse.parse_qsl(urllib.parse.urlsplit(h.path).query, keep_blank_values=True)
+
+
+def api_mly_graph(h, b, path):
+    h.user()
+    need_token()
+    q = urllib.parse.urlencode([(k, v) for k, v in query_of(h) if k != "access_token"])
+    status, ctype, body = mly_fetch(f"https://graph.mapillary.com/{path}?{q}", {"Authorization": f"OAuth {token()}"})
+    if status == 200:
+        body = json.dumps(proxied(json.loads(body))).encode()
+    return Raw(body, "application/json", status)
+
+
+def api_mly_media(h, b):
+    h.user()
+    url = dict(query_of(h)).get("u", "")
+    if not media_ok(url):
+        raise Err(400, "Not a Mapillary file")
+    status, ctype, body = mly_fetch(url, media=True)
+    return Raw(body, ctype, status, cache="private, max-age=86400")
 
 
 def api_peek(h, b, gid):
@@ -1197,6 +1279,9 @@ ROUTES = [
     ("GET", r"/api/game/(\d+)", api_game),
     ("POST", r"/api/game/(\d+)/guess", api_guess),
     ("GET", r"/api/game/(\d+)/peek", api_peek),
+    ("POST", r"/api/game/(\d+)/swap", api_swap),
+    ("GET", r"/api/mly/(images|image_ids|\d+/tiles)", api_mly_graph),
+    ("GET", r"/api/mly/media", api_mly_media),
     ("GET", r"/api/lobbies", api_my_lobbies),
     ("POST", r"/api/queue", api_queue),
     ("GET", r"/api/status", api_status),
@@ -1250,11 +1335,11 @@ class Handler(BaseHTTPRequestHandler):
             raise Err(403, "Admins only")
         return u
 
-    def send(self, code, body, ctype="application/json", cookie=None):
+    def send(self, code, body, ctype="application/json", cookie=None, cache=None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache or "no-store")
         if cookie:
             self.send_header("Set-Cookie", cookie)
         self.end_headers()
@@ -1288,6 +1373,8 @@ class Handler(BaseHTTPRequestHandler):
                     if not isinstance(body, dict):
                         raise Err(400, "Bad request")
                 res, cookie = fn(self, body, *m.groups()), None
+                if isinstance(res, Raw):
+                    return self.send(res.status, res.body, res.ctype, cache=res.cache if res.status == 200 else None)
                 if isinstance(res, tuple):
                     res, cookie = res
                 return self.send(200, json.dumps(res).encode(), cookie=cookie)

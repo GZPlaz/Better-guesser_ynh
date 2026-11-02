@@ -1,5 +1,6 @@
 """End-to-end self-check: python3 tests/test_app.py (no network; Mapillary is stubbed)."""
 import http.cookiejar, io, itertools, json, sqlite3, os, sys, tempfile, threading, urllib.error, urllib.parse, urllib.request
+REAL_URLOPEN = urllib.request.urlopen  # some tests below swap in fakes
 
 os.environ["BG_DB"] = os.path.join(tempfile.mkdtemp(), "t.db")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -483,9 +484,10 @@ assert boss("admin/settings") == {"mapillary_token": "MLY|secret", "registration
 assert not any("MLY|secret" in (e["detail"] or "") for e in boss("admin/log")["log"])  # the token is never logged
 
 # real pick_location against fake Mapillary responses: retries empty areas, prefers 360° panoramas
-answers = iter([{"data": []}, {"data": [{"id": "flat", "geometry": {"coordinates": [2, 1]}},
-                                        {"id": "PANO", "is_pano": True, "geometry": {"coordinates": [11.4, 48.0]},
-                                         "computed_geometry": {"coordinates": [11.5, 48.1]}}]}])
+answers = iter([{"data": [{"id": "unprocessed", "is_pano": True, "geometry": {"coordinates": [2, 1]}}]},  # no thumbnail: skipped
+                {"data": [{"id": "flat", "geometry": {"coordinates": [2, 1]}, "thumb_1024_url": "https://x.fbcdn.net/t"},
+                          {"id": "PANO", "is_pano": True, "geometry": {"coordinates": [11.4, 48.0]}, "thumb_1024_url": "https://x.fbcdn.net/p",
+                           "computed_geometry": {"coordinates": [11.5, 48.1]}}]}])
 seen = []
 
 
@@ -513,6 +515,85 @@ try:
     raise AssertionError("expected an error")
 except app.Err as e:
     assert e.code == 502 and "401" in e.msg and "token" in e.msg
+
+# ---- Mapillary proxy: the browser only ever talks to this server ----
+app.set_setting("mapillary_token", "MLY|server")
+calls = []
+
+
+class FakeMly(io.BytesIO):
+    def __init__(self, body, url, ctype="application/json"):
+        super().__init__(body)
+        self.status, self.url, self.headers = 200, url, {"Content-Type": ctype}
+    def geturl(self): return self.url
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+
+
+def mly_urlopen(req, timeout=None):
+    url = req.full_url if hasattr(req, "full_url") else req
+    if "127.0.0.1" in url:
+        return REAL_URLOPEN(req, timeout=timeout)
+    calls.append((url, dict(req.header_items()) if hasattr(req, "header_items") else {}))
+    if "graph.mapillary.com" in url:
+        return FakeMly(json.dumps({"data": [{"id": "1", "thumb_2048_url": "https://scontent-a.xx.fbcdn.net/t.jpg?x=1&y=2",
+                                            "mesh": {"url": "https://scontent-b.xx.fbcdn.net/m"}, "note": "https://evil.example/x"}]}).encode(), url)
+    if "redirect" in url:
+        return FakeMly(b"x", "https://evil.example/stolen", "image/jpeg")
+    return FakeMly(b"JPEGDATA", url, "image/jpeg")
+
+
+app.urllib.request.urlopen = mly_urlopen
+opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+opener.open(urllib.request.Request(BASE + "api/login", json.dumps({"username": "boss", "password": "adminpass"}).encode(), {"Content-Type": "application/json"}))
+r = opener.open(BASE + "api/mly/images?image_ids=1&fields=id,thumb_2048_url&access_token=CLIENT")
+data = json.load(r)
+url, headers = calls[-1]
+assert url.startswith("https://graph.mapillary.com/images?") and "access_token" not in url and "image_ids=1" in url
+assert headers.get("Authorization") == "OAuth MLY|server"  # the server's token, never the browser's
+item = data["data"][0]
+assert item["thumb_2048_url"] == "api/mly/media?u=" + urllib.parse.quote("https://scontent-a.xx.fbcdn.net/t.jpg?x=1&y=2", safe="")
+assert item["mesh"]["url"].startswith("api/mly/media?u=") and item["note"] == "https://evil.example/x"  # only Mapillary hosts rewritten
+r = opener.open(BASE + item["thumb_2048_url"])
+assert r.read() == b"JPEGDATA" and r.headers["Content-Type"] == "image/jpeg" and "max-age" in r.headers["Cache-Control"]
+assert opener.open(BASE + "api/mly/123456/tiles?z=11").status == 200 and calls[-1][0].startswith("https://graph.mapillary.com/123456/tiles?")
+for bad, code in [("https://evil.example/x", 400), ("http://scontent.xx.fbcdn.net/x", 400), ("https://scontent.xx.fbcdn.net.evil.example/x", 400),
+                  ("https://scontent.xx.fbcdn.net/redirect", 502)]:
+    try:
+        opener.open(BASE + "api/mly/media?u=" + urllib.parse.quote(bad, safe=""))
+        raise AssertionError(bad)
+    except urllib.error.HTTPError as e:
+        assert e.code == code, (bad, e.code)
+try:
+    REAL_URLOPEN(BASE + "api/mly/images?image_ids=1")  # not logged in
+    raise AssertionError("proxy must need a login")
+except urllib.error.HTTPError as e:
+    assert e.code == 401
+try:
+    opener.open(BASE + "api/mly/me?fields=id")  # only the paths MapillaryJS uses
+    raise AssertionError("unexpected path allowed")
+except urllib.error.HTTPError as e:
+    assert e.code == 404
+app.urllib.request.urlopen = REAL_URLOPEN
+
+# ---- broken photos get swapped, never guessed blind ----
+sw = client()
+sw("login", {"username": "boss", "password": "adminpass"})
+g = sw("game", {})
+assert g["swaps_left"] == 3 and "token" not in g  # the browser no longer gets the token
+first = g["image_id"]
+for left in (2, 1, 0):
+    g = sw(f"game/{g['id']}/swap", {})
+    assert g["image_id"] != first and g["round"] == 1 and g["swaps_left"] == left
+sw(f"game/{g['id']}/swap", {}, expect=429)  # capped, so it can't be used to dodge hard rounds
+lc = sw("lobby", {"mode": "1v1"})["code"]
+qz("lobby/join", {"code": lc})
+sw(f"lobby/{lc}/start", {})
+ga = sw(f"lobby/{lc}/play", {})
+old = ga["image_id"]
+ga = sw(f"game/{ga['id']}/swap", {})
+gb = qz(f"lobby/{lc}/play", {})
+assert gb["image_id"] == ga["image_id"] != old  # the other player gets the working photo, not the broken one
 client()("register", {"username": "eve", "password": "secret1"}, expect=403)
 
 # ---- login throttling (last: it locks out this IP) ----

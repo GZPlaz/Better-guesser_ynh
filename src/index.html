@@ -127,6 +127,8 @@
   #pano { position:absolute; inset:0; }
   #pano-loading { position:absolute; inset:0; z-index:15; display:grid; place-content:center; justify-items:center; gap:14px; background:var(--bg); color:var(--mute); font-weight:700; }
   #pano-loading::before { content:""; width:38px; height:38px; border-radius:50%; border:4px solid var(--line); border-top-color:var(--go); animation:spin .8s linear infinite; }
+  #pano-loading.failed::before { display:none; } #pano-loading span { max-width:420px; text-align:center; padding:0 20px; }
+  #pano-loading.failed { color:var(--fg); }
   @keyframes spin { to { transform:rotate(360deg); } }
   .hud { position:absolute; top:14px; right:14px; z-index:20; display:flex; border-radius:12px; overflow:hidden; box-shadow:0 6px 18px rgba(0,0,0,.4); }
   .hud div { background:rgba(13,19,33,.88); padding:8px 16px; display:flex; flex-direction:column; align-items:center; border-left:1px solid var(--line); }
@@ -776,32 +778,56 @@ function hud() {
   $('#hud-round').textContent = `${game.round ?? game.rounds} / ${game.rounds}`;
   $('#hud-score').textContent = fmt(game.total);
 }
-function showPano() {
-  // Movement arrows, keyboard and zoom stay on so players can walk around. The built-in attribution is off:
-  // its link opens the photo on mapillary.com, which shows where it is (see #credit instead).
-  // A fresh viewer every round: moving one viewer across the world makes MapillaryJS load and animate from the old spot,
-  // which can take ages or stall on the old photo. The cover hides the viewer until the new photo is in.
+// Nobody guesses blind: Guess unlocks only once this round's photo has loaded.
+let imageReady = false, panoRun = 0;
+function setGuessable() {
+  $('#guess').disabled = !(imageReady && guessMarker);
+  $('#guess').textContent = !imageReady ? 'Loading…' : guessMarker ? 'Guess' : 'Place your pin';
+}
+function cover(text, failed = false) {
+  const c = $('#pano-loading');
+  c.classList.toggle('hidden', !text); c.classList.toggle('failed', failed);
+  c.innerHTML = text ? `<span>${esc(text)}</span>${failed ? '<button class="btn" id="pano-retry">Try again</button>' : ''}` : '';
+}
+$('#pano-loading').onclick = e => e.target.id === 'pano-retry' && round();
+function openViewer(id) {
+  // A fresh viewer every round: moving one viewer across the world makes MapillaryJS animate from the old spot, which can stall.
+  // It talks only to this server (api/mly/…), which fetches from Mapillary, so it works on networks that block Mapillary or
+  // Facebook's CDN, like many schools. Movement arrows, keyboard and zoom stay on; the built-in attribution is off because
+  // its link opens the photo on mapillary.com with its location (see #credit instead).
   viewer?.remove();
-  const v = viewer = new mapillary.Viewer({ accessToken: game.token, container: 'pano', component: { cover: false, attribution: false } });
-  v.moveTo(game.image_id).then(
-    () => v === viewer && $('#pano-loading').classList.add('hidden'),
-    () => { if (v !== viewer) return; $('#pano-loading').classList.add('hidden'); toast('This location\'s imagery failed to load. Place your best guess anyway.', true); });
+  viewer = new mapillary.Viewer({ container: 'pano', component: { cover: false, attribution: false },
+    dataProvider: new mapillary.GraphDataProvider({ endpoint: new URL('api/mly/', location.href).href }) });
+  return viewer.moveTo(id);
+}
+async function showPano() {
+  const run = ++panoRun;
+  for (let tries = 1; ; tries++) {
+    try { await openViewer(game.image_id); break; } catch { if (run !== panoRun) return; }
+    if (tries % 2) continue;  // try each photo twice: network hiccups happen
+    // this photo won't load: swap in another location (the server caps swaps per game, so it can't dodge hard rounds)
+    cover('That spot wouldn\'t load. Finding another one…');
+    try { game = await api(`game/${game.id}/swap`, {}); } catch (e) { if (run === panoRun) cover(e.message, true); return; }
+    if (run !== panoRun) return;
+  }
+  if (run !== panoRun) return;
+  imageReady = true; cover(null); setGuessable();
 }
 
 function placeGuess(ll) {
   guessMarker ? guessMarker.setLngLat(ll) : (guessMarker = mark(pinEl('#29d398'), ll, gmap));
-  $('#guess').disabled = false; $('#guess').textContent = 'Guess';
+  setGuessable();
 }
 async function round() {
   show('v-game'); hud();
-  $('#pano-loading').classList.remove('hidden');  // covers the old photo, and the first-game library download
   [guessMarker, peekMarker].forEach(m => m?.remove());
   guessMarker = peekMarker = null;
-  $('#guess').disabled = true; $('#guess').textContent = 'Place your pin';
+  imageReady = false; setGuessable();
+  cover('Loading street view…');  // hides the old photo, and the first game's library download
   $('#guessbox').classList.remove('open');
   $('#cheatbar').classList.toggle('hidden', !me.cheat_reveal && !me.cheat_aim);
   $('#peek').classList.toggle('hidden', !me.cheat_reveal); $('#aim').classList.toggle('hidden', !me.cheat_aim);
-  try { await libs(); } catch (e) { $('#pano-loading').classList.add('hidden'); return fail(e); }
+  try { await libs(); } catch (e) { return cover(e.message, true); }
   showPano();
   if (!gmap) {
     gmap = newMap($('#gmap'));
@@ -881,7 +907,7 @@ $('#guess').onclick = async () => {
   const ll = guessMarker.getLngLat().wrap();
   let r;
   try { r = await api(`game/${game.id}/guess`, { lat: ll.lat, lng: ll.lng }); }
-  catch (e) { fail(e); $('#guess').disabled = false; return; }
+  catch (e) { fail(e); setGuessable(); return; }
   game.total = r.total; game.done = r.done;
   show('v-result');
   resultMap().then(() => fit(drawPairs([{ g: r.guess, a: r.answer }]), 13)).catch(fail);
